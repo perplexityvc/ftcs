@@ -9,6 +9,16 @@ import re
 import csv
 import sys
 import os
+import builtins
+
+
+def print(*args, **kwargs):
+    """Print wrapper that falls back to ASCII-safe output on encoding errors."""
+    try:
+        builtins.print(*args, **kwargs)
+    except UnicodeEncodeError:
+        safe_args = [str(arg).encode('ascii', 'replace').decode('ascii') for arg in args]
+        builtins.print(*safe_args, **kwargs)
 
 # Import settings
 try:
