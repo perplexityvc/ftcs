@@ -869,6 +869,7 @@ def main(input_image=None, year_filter_value=None):
             
             print("\n[8/8] Exporting...")
             save_csv(table, csv_output)
+            generate_excel_code(table, excel_generator)
             
             # Show absolute paths
             import os
@@ -1270,17 +1271,17 @@ OCR Table Extraction Tool - Version 4.3
 USAGE:
 
 1. Single Image:
-   python tesseract_version.py image.png
-   python tesseract_version.py image.png --year 2020
+   python extract.py image.png
+   python extract.py image.png --year 2020
 
 2. Batch Processing:
-   python tesseract_version.py --batch folder_path output.csv
-   python tesseract_version.py --batch folder_path output.csv --year 2020
+   python extract.py --batch folder_path output.csv
+   python extract.py --batch folder_path output.csv --year 2020
    
 3. Batch with Defaults (uses settings.py):
-   python tesseract_version.py --batch
-   python tesseract_version.py --batch --year 2020
-   python tesseract_version.py --batch output.csv --year 2020
+   python extract.py --batch
+   python extract.py --batch --year 2020
+   python extract.py --batch output.csv --year 2020
 
 OPTIONS:
    --year YYYY    Filter results to only include specified year
@@ -1295,22 +1296,22 @@ DEFAULT SETTINGS (configured in settings.py):
 EXAMPLES:
 
    # Single image
-   python tesseract_version.py frame_0004.png
+   python extract.py frame_0004.png
 
    # Single image with year filter
-   python tesseract_version.py frame_0004.png --year 2020
+   python extract.py frame_0004.png --year 2020
 
    # Batch process with explicit paths
-   python tesseract_version.py --batch ./images combined_output.csv
+   python extract.py --batch ./images combined_output.csv
 
    # Batch process with defaults from settings.py
-   python tesseract_version.py --batch
+   python extract.py --batch
 
    # Batch process with year filter (using defaults)
-   python tesseract_version.py --batch --year 2020
+   python extract.py --batch --year 2020
 
    # Batch with custom output but default input folder
-   python tesseract_version.py --batch my_output.csv --year 2020
+   python extract.py --batch my_output.csv --year 2020
         """)
         sys.exit(0)
     
