@@ -5,6 +5,8 @@ import time
 import os
 import json
 import threading
+import subprocess
+import sys
 from datetime import datetime
 from skimage.metrics import structural_similarity as ssim
 from pathlib import Path
@@ -504,6 +506,14 @@ class AutomationGUI:
         self.log_text.insert(tk.END, message + "\n")
         self.log_text.see(tk.END)
         self.root.update_idletasks()
+
+    def thread_safe_log_message(self, message):
+        """Add a log message safely from any thread."""
+        self.root.after(0, lambda: self.log_message(message))
+
+    def thread_safe_set_status(self, message):
+        """Update status safely from any thread."""
+        self.root.after(0, lambda: self.status_var.set(message))
     
     def clear_log(self):
         """Clear the log text widget."""
@@ -571,7 +581,7 @@ class AutomationGUI:
             return
         
         # Create engine with log callback
-        self.engine = AutomationEngine(Config, log_callback=self.log_message)
+        self.engine = AutomationEngine(Config, log_callback=self.thread_safe_log_message)
         
         # Update UI state
         self.start_button.config(state=tk.DISABLED)
@@ -588,9 +598,53 @@ class AutomationGUI:
         """Run automation (called in separate thread)."""
         try:
             self.engine.run()
+            self.run_extraction_after_capture()
         finally:
             # Update UI when done (must use after to run in main thread)
             self.root.after(0, self.automation_finished)
+
+    def run_extraction_after_capture(self):
+        """Run extract.py batch OCR after screenshots are captured."""
+        capture_dir = Config.SAVE_DIR
+        if not capture_dir or not os.path.isdir(capture_dir):
+            self.thread_safe_log_message("Skipping OCR extraction: capture directory is missing")
+            return
+
+        png_files = [name for name in os.listdir(capture_dir) if name.lower().endswith('.png')]
+        if not png_files:
+            self.thread_safe_log_message("Skipping OCR extraction: no PNG files found in capture directory")
+            return
+
+        extract_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'extract.py')
+        if not os.path.exists(extract_script):
+            self.thread_safe_log_message("Skipping OCR extraction: extract.py not found")
+            return
+
+        output_csv = os.path.join(capture_dir, 'combined_output.csv')
+        cmd = [sys.executable, extract_script, '--batch', capture_dir, output_csv]
+
+        self.thread_safe_set_status("Running OCR extraction...")
+        self.thread_safe_log_message("Starting OCR extraction on captured screenshots...")
+        self.thread_safe_log_message(f"Command: {' '.join(cmd)}")
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+        except Exception as exc:
+            self.thread_safe_log_message(f"OCR extraction failed to start: {exc}")
+            return
+
+        if result.returncode == 0:
+            self.thread_safe_log_message(f"OCR extraction completed. Output: {output_csv}")
+            if result.stdout.strip():
+                self.thread_safe_log_message("Extractor output (last lines):")
+                for line in result.stdout.strip().splitlines()[-8:]:
+                    self.thread_safe_log_message(line)
+        else:
+            self.thread_safe_log_message(f"OCR extraction failed with exit code {result.returncode}")
+            if result.stderr.strip():
+                self.thread_safe_log_message("Extractor error output:")
+                for line in result.stderr.strip().splitlines()[-8:]:
+                    self.thread_safe_log_message(line)
     
     def automation_finished(self):
         """Called when automation completes."""
