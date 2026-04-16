@@ -1,0 +1,621 @@
+import pyautogui
+import cv2
+import numpy as np
+import time
+import os
+import json
+import threading
+from datetime import datetime
+from skimage.metrics import structural_similarity as ssim
+from pathlib import Path
+import tkinter as tk
+from tkinter import ttk, scrolledtext, filedialog, messagebox
+
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+class Config:
+    """Configuration class for automation settings."""
+    
+    # Directories
+    SAVE_DIR = os.path.join(os.getcwd(), "captured_screens")
+    CONFIG_FILE = "automation_config.json"
+    
+    # Timing
+    SCROLL_DELAY = 1.0
+    INITIAL_DELAY = 5.0
+    ADAPTIVE_WAIT_CHECKS = 3
+    ADAPTIVE_WAIT_INTERVAL = 0.3
+    
+    # Image comparison
+    SSIM_TOLERANCE = 0.97
+    
+    # Safety limits
+    MAX_PAGES_PER_SECTION = 100
+    MAX_SECTIONS = 50
+    MAX_CONSECUTIVE_IDENTICAL = 3
+    
+    @classmethod
+    def load_from_file(cls):
+        """Load configuration from JSON file if it exists."""
+        if os.path.exists(cls.CONFIG_FILE):
+            try:
+                with open(cls.CONFIG_FILE, 'r') as f:
+                    config_data = json.load(f)
+                    for key, value in config_data.items():
+                        if hasattr(cls, key.upper()):
+                            setattr(cls, key.upper(), value)
+            except Exception:
+                pass
+    
+    @classmethod
+    def save_to_file(cls):
+        """Save current configuration to JSON file."""
+        config_data = {
+            'save_dir': cls.SAVE_DIR,
+            'scroll_delay': cls.SCROLL_DELAY,
+            'initial_delay': cls.INITIAL_DELAY,
+            'ssim_tolerance': cls.SSIM_TOLERANCE,
+            'max_pages_per_section': cls.MAX_PAGES_PER_SECTION,
+            'max_sections': cls.MAX_SECTIONS,
+            'max_consecutive_identical': cls.MAX_CONSECUTIVE_IDENTICAL,
+            'adaptive_wait_checks': cls.ADAPTIVE_WAIT_CHECKS,
+        }
+        try:
+            with open(cls.CONFIG_FILE, 'w') as f:
+                json.dump(config_data, f, indent=2)
+        except Exception as e:
+            print(f"Could not save config: {e}")
+
+
+# ============================================================================
+# IMAGE PROCESSING
+# ============================================================================
+
+class ImageComparator:
+    """Handles image comparison with multiple strategies."""
+    
+    def __init__(self, tolerance=0.97):
+        self.tolerance = tolerance
+        self.comparison_count = 0
+    
+    def compare(self, img1, img2):
+        """Compare two images using pixel-perfect and SSIM checks."""
+        self.comparison_count += 1
+        
+        if img1.shape != img2.shape:
+            return False, "dimension_check", 0.0
+        
+        if np.array_equal(img1, img2):
+            return True, "pixel_perfect", 1.0
+        
+        gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+        gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
+        
+        score, _ = ssim(gray1, gray2, full=True, data_range=255)
+        is_similar = score >= self.tolerance
+        
+        return is_similar, "ssim", score
+
+
+class ScreenCapture:
+    """Handles screenshot capture and saving."""
+    
+    def __init__(self, save_dir):
+        self.save_dir = save_dir
+        self.ensure_directory()
+    
+    def ensure_directory(self):
+        """Create save directory if it doesn't exist."""
+        os.makedirs(self.save_dir, exist_ok=True)
+    
+    def capture(self):
+        """Take a screenshot and return as OpenCV image."""
+        screenshot = pyautogui.screenshot()
+        frame = np.array(screenshot)
+        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        return frame
+    
+    def save(self, image, filename):
+        """Save image to disk with verification."""
+        filepath = os.path.join(self.save_dir, filename)
+        
+        try:
+            success = cv2.imwrite(filepath, image)
+            if success and os.path.exists(filepath):
+                return True, os.path.getsize(filepath)
+            return False, 0
+        except Exception:
+            return False, 0
+    
+    def wait_for_screen_stability(self, delay=0.5, checks=3):
+        """Wait for screen to stabilize."""
+        prev_img = self.capture()
+        stable_count = 0
+        
+        for _ in range(checks):
+            time.sleep(delay)
+            new_img = self.capture()
+            
+            if np.array_equal(prev_img, new_img):
+                stable_count += 1
+            else:
+                stable_count = 0
+            
+            prev_img = new_img
+            
+            if stable_count >= 2:
+                return True
+        
+        return True
+
+
+# ============================================================================
+# AUTOMATION ENGINE
+# ============================================================================
+
+class AutomationEngine:
+    """Main automation engine for screen capture."""
+    
+    def __init__(self, config, log_callback=None):
+        self.config = config
+        self.log_callback = log_callback
+        self.capture = ScreenCapture(config.SAVE_DIR)
+        self.comparator = ImageComparator(tolerance=config.SSIM_TOLERANCE)
+        
+        self.section_count = 0
+        self.is_running = False
+        self.should_stop = False
+        
+        self.stats = {
+            'start_time': None,
+            'sections': 0,
+            'pages': 0,
+            'comparisons': 0
+        }
+    
+    def log(self, message, level="INFO"):
+        """Log message through callback if available."""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        formatted_msg = f"[{timestamp}] [{level}] {message}"
+        
+        if self.log_callback:
+            self.log_callback(formatted_msg)
+        else:
+            print(formatted_msg)
+    
+    def initialize(self):
+        """Initialize automation with countdown."""
+        self.log("=" * 60)
+        self.log("SCREEN CAPTURE AUTOMATION STARTED")
+        self.log("=" * 60)
+        self.log(f"Save directory: {self.config.SAVE_DIR}")
+        self.log(f"SSIM tolerance: {self.config.SSIM_TOLERANCE}")
+        self.log(f"Max pages/section: {self.config.MAX_PAGES_PER_SECTION}")
+        self.log(f"Max sections: {self.config.MAX_SECTIONS}")
+        self.log("")
+        self.log("PLEASE FOCUS THE TARGET WINDOW NOW!")
+        
+        for i in range(int(self.config.INITIAL_DELAY), 0, -1):
+            if self.should_stop:
+                return False
+            self.log(f"Starting in {i} seconds...")
+            time.sleep(1)
+        
+        self.log("Starting automation NOW!")
+        return True
+    
+    def simulate_key_and_wait(self, key):
+        """Simulate key press and wait for screen to stabilize."""
+        pyautogui.press(key)
+        time.sleep(self.config.SCROLL_DELAY)
+        
+        if self.config.ADAPTIVE_WAIT_CHECKS > 0:
+            self.capture.wait_for_screen_stability(
+                delay=self.config.ADAPTIVE_WAIT_INTERVAL,
+                checks=self.config.ADAPTIVE_WAIT_CHECKS
+            )
+    
+    def process_section(self):
+        """Process a single section by paging through it."""
+        self.section_count += 1
+        page_count = 1
+        consecutive_identical = 0
+        
+        self.log("")
+        self.log(f"{'='*60}")
+        self.log(f"SECTION {self.section_count}")
+        self.log(f"{'='*60}")
+        
+        # Capture first page
+        current_img = self.capture.capture()
+        filename = f"section_{self.section_count:03d}_page_{page_count:03d}.png"
+        
+        success, size = self.capture.save(current_img, filename)
+        if not success:
+            self.log("Failed to save first page, aborting section", "ERROR")
+            return False
+        
+        self.log(f"Saved: {filename} ({size} bytes)")
+        self.stats['pages'] += 1
+        last_page_img = current_img
+        
+        # Page through section
+        while page_count < self.config.MAX_PAGES_PER_SECTION and not self.should_stop:
+            # Simulate PageDown
+            self.simulate_key_and_wait('pagedown')
+            
+            # Capture new screen
+            new_img = self.capture.capture()
+            
+            # Compare images
+            is_equal, method, score = self.comparator.compare(last_page_img, new_img)
+            self.stats['comparisons'] += 1
+            
+            if is_equal:
+                consecutive_identical += 1
+                self.log(f"Screen unchanged ({consecutive_identical}/"
+                       f"{self.config.MAX_CONSECUTIVE_IDENTICAL})")
+                
+                if consecutive_identical >= self.config.MAX_CONSECUTIVE_IDENTICAL:
+                    self.log("End of section detected (screen stopped changing)")
+                    break
+            else:
+                consecutive_identical = 0
+                page_count += 1
+                self.stats['pages'] += 1
+                
+                filename = f"section_{self.section_count:03d}_page_{page_count:03d}.png"
+                success, size = self.capture.save(new_img, filename)
+                
+                if success:
+                    self.log(f"Saved: {filename} ({size} bytes)")
+                else:
+                    self.log(f"Failed to save {filename}", "WARNING")
+                
+                last_page_img = new_img
+        
+        if page_count >= self.config.MAX_PAGES_PER_SECTION:
+            self.log(f"Reached max pages ({self.config.MAX_PAGES_PER_SECTION})", "WARNING")
+        
+        return last_page_img
+    
+    def try_next_section(self, last_section_img):
+        """Attempt to move to next section."""
+        self.log("")
+        self.log("Attempting to move to next section (pressing ENTER)...")
+        
+        self.simulate_key_and_wait('enter')
+        
+        next_img = self.capture.capture()
+        is_same, method, score = self.comparator.compare(last_section_img, next_img)
+        self.stats['comparisons'] += 1
+        
+        if is_same:
+            self.log("No new section loaded (screen unchanged)")
+            return False
+        
+        self.log("New section detected!")
+        return True
+    
+    def stop(self):
+        """Signal the automation to stop."""
+        self.should_stop = True
+        self.log("Stop requested by user...", "WARNING")
+    
+    def run(self):
+        """Main automation loop."""
+        self.is_running = True
+        self.should_stop = False
+        self.stats['start_time'] = datetime.now()
+        
+        try:
+            if not self.initialize():
+                self.log("Initialization cancelled", "WARNING")
+                return
+            
+            while self.section_count < self.config.MAX_SECTIONS and not self.should_stop:
+                last_section_img = self.process_section()
+                
+                if last_section_img is False:
+                    self.log("Section processing failed, stopping", "ERROR")
+                    break
+                
+                self.stats['sections'] = self.section_count
+                
+                if not self.try_next_section(last_section_img):
+                    break
+            
+            if self.section_count >= self.config.MAX_SECTIONS:
+                self.log(f"Reached max sections limit ({self.config.MAX_SECTIONS})", "WARNING")
+            
+            self.print_summary()
+            
+        except Exception as e:
+            self.log(f"Unexpected error: {e}", "ERROR")
+            self.print_summary()
+        finally:
+            self.is_running = False
+    
+    def print_summary(self):
+        """Print automation statistics."""
+        if self.stats['start_time']:
+            elapsed = datetime.now() - self.stats['start_time']
+        else:
+            elapsed = "N/A"
+        
+        self.log("")
+        self.log("=" * 60)
+        self.log("AUTOMATION COMPLETE")
+        self.log("=" * 60)
+        self.log(f"Sections processed: {self.stats['sections']}")
+        self.log(f"Pages captured: {self.stats['pages']}")
+        self.log(f"Image comparisons: {self.stats['comparisons']}")
+        self.log(f"Total time: {elapsed}")
+        self.log(f"Screenshots saved to: {self.config.SAVE_DIR}")
+        self.log("=" * 60)
+
+
+# ============================================================================
+# GUI APPLICATION
+# ============================================================================
+
+class AutomationGUI:
+    """GUI application for screen capture automation."""
+    
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Screen Capture Automation")
+        self.root.geometry("900x700")
+        
+        # Load configuration
+        Config.load_from_file()
+        
+        # Automation engine
+        self.engine = None
+        self.automation_thread = None
+        
+        # PyAutoGUI failsafe
+        pyautogui.FAILSAFE = True
+        
+        # Build UI
+        self.create_widgets()
+        self.load_config_to_ui()
+    
+    def create_widgets(self):
+        """Create all GUI widgets."""
+        
+        # Main container
+        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # Configure grid weights
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=1)
+        main_frame.columnconfigure(0, weight=1)
+        main_frame.rowconfigure(2, weight=1)
+        
+        # === Configuration Section ===
+        config_frame = ttk.LabelFrame(main_frame, text="Configuration", padding="10")
+        config_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N), pady=(0, 10))
+        config_frame.columnconfigure(1, weight=1)
+        
+        # Save Directory
+        ttk.Label(config_frame, text="Save Directory:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        self.save_dir_var = tk.StringVar(value=Config.SAVE_DIR)
+        dir_frame = ttk.Frame(config_frame)
+        dir_frame.grid(row=0, column=1, sticky=(tk.W, tk.E), pady=5)
+        dir_frame.columnconfigure(0, weight=1)
+        ttk.Entry(dir_frame, textvariable=self.save_dir_var).grid(row=0, column=0, sticky=(tk.W, tk.E), padx=(0, 5))
+        ttk.Button(dir_frame, text="Browse", command=self.browse_directory, width=10).grid(row=0, column=1)
+        
+        # Scroll Delay
+        ttk.Label(config_frame, text="Scroll Delay (sec):").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.scroll_delay_var = tk.DoubleVar(value=Config.SCROLL_DELAY)
+        ttk.Spinbox(config_frame, from_=0.1, to=5.0, increment=0.1, 
+                   textvariable=self.scroll_delay_var, width=15).grid(row=1, column=1, sticky=tk.W, pady=5)
+        
+        # Initial Delay
+        ttk.Label(config_frame, text="Initial Delay (sec):").grid(row=2, column=0, sticky=tk.W, pady=5)
+        self.initial_delay_var = tk.DoubleVar(value=Config.INITIAL_DELAY)
+        ttk.Spinbox(config_frame, from_=1, to=30, increment=1, 
+                   textvariable=self.initial_delay_var, width=15).grid(row=2, column=1, sticky=tk.W, pady=5)
+        
+        # SSIM Tolerance
+        ttk.Label(config_frame, text="SSIM Tolerance:").grid(row=3, column=0, sticky=tk.W, pady=5)
+        self.ssim_tolerance_var = tk.DoubleVar(value=Config.SSIM_TOLERANCE)
+        ttk.Spinbox(config_frame, from_=0.80, to=0.999, increment=0.01, 
+                   textvariable=self.ssim_tolerance_var, width=15, format="%.3f").grid(row=3, column=1, sticky=tk.W, pady=5)
+        
+        # Max Pages Per Section
+        ttk.Label(config_frame, text="Max Pages/Section:").grid(row=4, column=0, sticky=tk.W, pady=5)
+        self.max_pages_var = tk.IntVar(value=Config.MAX_PAGES_PER_SECTION)
+        ttk.Spinbox(config_frame, from_=10, to=500, increment=10, 
+                   textvariable=self.max_pages_var, width=15).grid(row=4, column=1, sticky=tk.W, pady=5)
+        
+        # Max Sections
+        ttk.Label(config_frame, text="Max Sections:").grid(row=5, column=0, sticky=tk.W, pady=5)
+        self.max_sections_var = tk.IntVar(value=Config.MAX_SECTIONS)
+        ttk.Spinbox(config_frame, from_=1, to=200, increment=1, 
+                   textvariable=self.max_sections_var, width=15).grid(row=5, column=1, sticky=tk.W, pady=5)
+        
+        # Max Consecutive Identical
+        ttk.Label(config_frame, text="Max Consecutive Identical:").grid(row=6, column=0, sticky=tk.W, pady=5)
+        self.max_consecutive_var = tk.IntVar(value=Config.MAX_CONSECUTIVE_IDENTICAL)
+        ttk.Spinbox(config_frame, from_=1, to=10, increment=1, 
+                   textvariable=self.max_consecutive_var, width=15).grid(row=6, column=1, sticky=tk.W, pady=5)
+        
+        # Config buttons
+        config_btn_frame = ttk.Frame(config_frame)
+        config_btn_frame.grid(row=7, column=0, columnspan=2, pady=10)
+        ttk.Button(config_btn_frame, text="Save Config", 
+                  command=self.save_config).pack(side=tk.LEFT, padx=5)
+        ttk.Button(config_btn_frame, text="Load Config", 
+                  command=self.load_config).pack(side=tk.LEFT, padx=5)
+        ttk.Button(config_btn_frame, text="Reset to Defaults", 
+                  command=self.reset_config).pack(side=tk.LEFT, padx=5)
+        
+        # === Control Section ===
+        control_frame = ttk.LabelFrame(main_frame, text="Control", padding="10")
+        control_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        
+        self.start_button = ttk.Button(control_frame, text="Start Capture", 
+                                       command=self.start_automation, width=20)
+        self.start_button.pack(side=tk.LEFT, padx=5)
+        
+        self.stop_button = ttk.Button(control_frame, text="Stop Capture", 
+                                      command=self.stop_automation, width=20, state=tk.DISABLED)
+        self.stop_button.pack(side=tk.LEFT, padx=5)
+        
+        self.clear_button = ttk.Button(control_frame, text="Clear Log", 
+                                       command=self.clear_log, width=15)
+        self.clear_button.pack(side=tk.LEFT, padx=5)
+        
+        # Status label
+        self.status_var = tk.StringVar(value="Ready")
+        status_label = ttk.Label(control_frame, textvariable=self.status_var, 
+                                font=('Arial', 10, 'bold'))
+        status_label.pack(side=tk.RIGHT, padx=10)
+        
+        # === Log Section ===
+        log_frame = ttk.LabelFrame(main_frame, text="Activity Log", padding="10")
+        log_frame.grid(row=2, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        log_frame.columnconfigure(0, weight=1)
+        log_frame.rowconfigure(0, weight=1)
+        
+        self.log_text = scrolledtext.ScrolledText(log_frame, height=15, 
+                                                  wrap=tk.WORD, font=('Consolas', 9))
+        self.log_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # Initial message
+        self.log_message("Screen Capture Automation GUI initialized")
+        self.log_message("Configure settings above and click 'Start Capture' to begin")
+        self.log_message(f"PyAutoGUI Failsafe: Move mouse to top-left corner to emergency stop")
+    
+    def browse_directory(self):
+        """Open directory browser dialog."""
+        directory = filedialog.askdirectory(initialdir=self.save_dir_var.get())
+        if directory:
+            self.save_dir_var.set(directory)
+    
+    def log_message(self, message):
+        """Add message to log text widget."""
+        self.log_text.insert(tk.END, message + "\n")
+        self.log_text.see(tk.END)
+        self.root.update_idletasks()
+    
+    def clear_log(self):
+        """Clear the log text widget."""
+        self.log_text.delete(1.0, tk.END)
+    
+    def update_config_from_ui(self):
+        """Update Config class from UI values."""
+        Config.SAVE_DIR = self.save_dir_var.get()
+        Config.SCROLL_DELAY = self.scroll_delay_var.get()
+        Config.INITIAL_DELAY = self.initial_delay_var.get()
+        Config.SSIM_TOLERANCE = self.ssim_tolerance_var.get()
+        Config.MAX_PAGES_PER_SECTION = self.max_pages_var.get()
+        Config.MAX_SECTIONS = self.max_sections_var.get()
+        Config.MAX_CONSECUTIVE_IDENTICAL = self.max_consecutive_var.get()
+    
+    def load_config_to_ui(self):
+        """Load Config values to UI."""
+        self.save_dir_var.set(Config.SAVE_DIR)
+        self.scroll_delay_var.set(Config.SCROLL_DELAY)
+        self.initial_delay_var.set(Config.INITIAL_DELAY)
+        self.ssim_tolerance_var.set(Config.SSIM_TOLERANCE)
+        self.max_pages_var.set(Config.MAX_PAGES_PER_SECTION)
+        self.max_sections_var.set(Config.MAX_SECTIONS)
+        self.max_consecutive_var.set(Config.MAX_CONSECUTIVE_IDENTICAL)
+    
+    def save_config(self):
+        """Save current configuration to file."""
+        self.update_config_from_ui()
+        Config.save_to_file()
+        messagebox.showinfo("Success", f"Configuration saved to {Config.CONFIG_FILE}")
+        self.log_message(f"Configuration saved to {Config.CONFIG_FILE}")
+    
+    def load_config(self):
+        """Load configuration from file."""
+        Config.load_from_file()
+        self.load_config_to_ui()
+        messagebox.showinfo("Success", f"Configuration loaded from {Config.CONFIG_FILE}")
+        self.log_message(f"Configuration loaded from {Config.CONFIG_FILE}")
+    
+    def reset_config(self):
+        """Reset configuration to defaults."""
+        if messagebox.askyesno("Confirm Reset", "Reset all settings to defaults?"):
+            Config.SAVE_DIR = os.path.join(os.getcwd(), "captured_screens")
+            Config.SCROLL_DELAY = 1.0
+            Config.INITIAL_DELAY = 5.0
+            Config.SSIM_TOLERANCE = 0.97
+            Config.MAX_PAGES_PER_SECTION = 100
+            Config.MAX_SECTIONS = 50
+            Config.MAX_CONSECUTIVE_IDENTICAL = 3
+            self.load_config_to_ui()
+            self.log_message("Configuration reset to defaults")
+    
+    def start_automation(self):
+        """Start the automation in a separate thread."""
+        if self.automation_thread and self.automation_thread.is_alive():
+            messagebox.showwarning("Warning", "Automation is already running!")
+            return
+        
+        # Update config from UI
+        self.update_config_from_ui()
+        
+        # Validate save directory
+        if not self.save_dir_var.get():
+            messagebox.showerror("Error", "Please specify a save directory!")
+            return
+        
+        # Create engine with log callback
+        self.engine = AutomationEngine(Config, log_callback=self.log_message)
+        
+        # Update UI state
+        self.start_button.config(state=tk.DISABLED)
+        self.stop_button.config(state=tk.NORMAL)
+        self.status_var.set("Running...")
+        
+        # Start automation in separate thread
+        self.automation_thread = threading.Thread(target=self.run_automation, daemon=True)
+        self.automation_thread.start()
+        
+        self.log_message("Automation started")
+    
+    def run_automation(self):
+        """Run automation (called in separate thread)."""
+        try:
+            self.engine.run()
+        finally:
+            # Update UI when done (must use after to run in main thread)
+            self.root.after(0, self.automation_finished)
+    
+    def automation_finished(self):
+        """Called when automation completes."""
+        self.start_button.config(state=tk.NORMAL)
+        self.stop_button.config(state=tk.DISABLED)
+        self.status_var.set("Ready")
+    
+    def stop_automation(self):
+        """Stop the running automation."""
+        if self.engine and self.engine.is_running:
+            self.engine.stop()
+            self.log_message("Stop signal sent to automation engine")
+            self.status_var.set("Stopping...")
+
+
+# ============================================================================
+# MAIN ENTRY POINT
+# ============================================================================
+
+def main():
+    """Main entry point for the GUI application."""
+    root = tk.Tk()
+    app = AutomationGUI(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()

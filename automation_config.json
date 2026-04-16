@@ -1,0 +1,6 @@
+{
+  "scroll_delay": 1.5,
+  "ssim_tolerance": 0.95,
+  "max_pages_per_section": 150,
+  "max_sections": 100
+}
