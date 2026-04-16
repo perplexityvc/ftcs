@@ -37,6 +37,10 @@ class Config:
     MAX_PAGES_PER_SECTION = 100
     MAX_SECTIONS = 50
     MAX_CONSECUTIVE_IDENTICAL = 3
+
+    # Stop condition for section switching
+    TOP_REGION_RATIO = 0.33
+    TOP_CHANGE_STOP_THRESHOLD = 0.20
     
     @classmethod
     def load_from_file(cls):
@@ -63,6 +67,9 @@ class Config:
             'max_sections': cls.MAX_SECTIONS,
             'max_consecutive_identical': cls.MAX_CONSECUTIVE_IDENTICAL,
             'adaptive_wait_checks': cls.ADAPTIVE_WAIT_CHECKS,
+            'adaptive_wait_interval': cls.ADAPTIVE_WAIT_INTERVAL,
+            'top_region_ratio': cls.TOP_REGION_RATIO,
+            'top_change_stop_threshold': cls.TOP_CHANGE_STOP_THRESHOLD,
         }
         try:
             with open(cls.CONFIG_FILE, 'w') as f:
@@ -291,6 +298,19 @@ class AutomationEngine:
         self.simulate_key_and_wait('enter')
         
         next_img = self.capture.capture()
+
+        # Guardrail: stop if top region changes too much
+        top_change_ratio = self.calculate_top_region_change_ratio(last_section_img, next_img)
+        threshold = float(getattr(self.config, 'TOP_CHANGE_STOP_THRESHOLD', 0.20))
+        if top_change_ratio > threshold:
+            self.log(
+                f"Top {int(getattr(self.config, 'TOP_REGION_RATIO', 0.33) * 100)}% changed "
+                f"by {top_change_ratio * 100:.1f}% (> {threshold * 100:.1f}%). Stopping capture.",
+                "WARNING",
+            )
+            self.should_stop = True
+            return False
+
         is_same, method, score = self.comparator.compare(last_section_img, next_img)
         self.stats['comparisons'] += 1
         
@@ -300,6 +320,31 @@ class AutomationEngine:
         
         self.log("New section detected!")
         return True
+
+    def calculate_top_region_change_ratio(self, img1, img2):
+        """Return changed-pixel ratio in top region between two images."""
+        if img1 is None or img2 is None or img1.shape != img2.shape:
+            return 1.0
+
+        top_ratio = float(getattr(self.config, 'TOP_REGION_RATIO', 0.33))
+        top_ratio = min(max(top_ratio, 0.01), 1.0)
+
+        height = img1.shape[0]
+        top_height = max(1, int(height * top_ratio))
+
+        region1 = img1[:top_height, :]
+        region2 = img2[:top_height, :]
+
+        gray1 = cv2.cvtColor(region1, cv2.COLOR_BGR2GRAY)
+        gray2 = cv2.cvtColor(region2, cv2.COLOR_BGR2GRAY)
+        diff = cv2.absdiff(gray1, gray2)
+
+        changed_pixels = np.count_nonzero(diff > 25)
+        total_pixels = diff.size
+        if total_pixels == 0:
+            return 0.0
+
+        return changed_pixels / total_pixels
     
     def stop(self):
         """Signal the automation to stop."""
@@ -563,6 +608,8 @@ class AutomationGUI:
             Config.MAX_PAGES_PER_SECTION = 100
             Config.MAX_SECTIONS = 50
             Config.MAX_CONSECUTIVE_IDENTICAL = 3
+            Config.TOP_REGION_RATIO = 0.33
+            Config.TOP_CHANGE_STOP_THRESHOLD = 0.20
             self.load_config_to_ui()
             self.log_message("Configuration reset to defaults")
     

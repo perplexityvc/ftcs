@@ -56,6 +56,12 @@ class PreprocessingSettings:
     # False = no sharpening
     APPLY_SHARPENING = True
 
+    # Vertical masking before OCR
+    # Top and bottom portions are blacked out on preprocessed images
+    APPLY_VERTICAL_MASK = True
+    MASK_TOP_RATIO = 0.33
+    MASK_BOTTOM_RATIO = 0.15
+
 
 # ============================================================================
 # TABLE DETECTION SETTINGS

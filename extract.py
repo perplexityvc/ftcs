@@ -46,6 +46,9 @@ except ImportError:
     preprocessing.PIL_THRESHOLD = 122
     preprocessing.CONTRAST_ENHANCEMENT = 1.2
     preprocessing.APPLY_SHARPENING = True
+    preprocessing.APPLY_VERTICAL_MASK = True
+    preprocessing.MASK_TOP_RATIO = 0.33
+    preprocessing.MASK_BOTTOM_RATIO = 0.15
     
     table_detection = Settings()
     table_detection.ROW_GROUPING_TOLERANCE = 20
@@ -108,7 +111,7 @@ def preprocess_image(input_path, output_path):
     """Preprocess green-on-black terminal image using Pillow"""
     
     try:
-        from PIL import Image, ImageOps, ImageFilter, ImageEnhance
+        from PIL import Image, ImageOps, ImageFilter, ImageEnhance, ImageDraw
         
         # Load image
         img = Image.open(input_path)
@@ -134,6 +137,20 @@ def preprocess_image(input_path, output_path):
         if preprocessing.CONTRAST_ENHANCEMENT != 1.0:
             enhancer = ImageEnhance.Contrast(img)
             img = enhancer.enhance(preprocessing.CONTRAST_ENHANCEMENT)
+
+        # Apply vertical masking before OCR
+        if getattr(preprocessing, 'APPLY_VERTICAL_MASK', True):
+            width, height = img.size
+            top_pixels = int(height * float(getattr(preprocessing, 'MASK_TOP_RATIO', 0.33)))
+            bottom_pixels = int(height * float(getattr(preprocessing, 'MASK_BOTTOM_RATIO', 0.15)))
+            draw = ImageDraw.Draw(img)
+
+            if top_pixels > 0:
+                draw.rectangle([0, 0, width - 1, min(top_pixels - 1, height - 1)], fill=0)
+
+            if bottom_pixels > 0:
+                start_y = max(0, height - bottom_pixels)
+                draw.rectangle([0, start_y, width - 1, height - 1], fill=0)
         
         # Save preprocessed image
         img.save(output_path)
@@ -902,7 +919,7 @@ def main(input_image=None, year_filter_value=None):
     # Check if we should use template-based extraction for small tables
     if should_use_template_extraction(words, rows):
         print("\n     ⚠ Small table detected - using template-based extraction")
-        template_rows, template_table_number = extract_with_template(input_image, year_filter_value)
+        template_rows, template_table_number = extract_with_template(ocr_image, year_filter_value)
         
         if template_rows:
             # Use template results
@@ -995,7 +1012,7 @@ def main(input_image=None, year_filter_value=None):
     # Fallback: If normal extraction yielded very few rows, try template
     if len(table) <= 1:  # Only header or empty
         print(f"     ⚠ Few rows detected - trying template-based extraction as fallback")
-        template_rows, template_table_number = extract_with_template(input_image, year_filter_value)
+        template_rows, template_table_number = extract_with_template(ocr_image, year_filter_value)
         
         if template_rows and len(template_rows) > 0:
             # Use template results
@@ -1139,7 +1156,7 @@ def batch_process_images(image_folder=None, output_csv=None, year_filter_value=N
             
             # Check if small table - use template extraction
             if should_use_template_extraction(words, rows):
-                template_rows, template_table_number = extract_with_template(image_path, year_filter_value)
+                template_rows, template_table_number = extract_with_template(ocr_image, year_filter_value)
                 if template_rows:
                     # Build table with template results
                     table = [['C/R Table', 'Date', 'Doc No.', 'Orig Amount', 'Acc Amount']]
@@ -1183,7 +1200,7 @@ def batch_process_images(image_folder=None, output_csv=None, year_filter_value=N
                 
                 # Fallback: If normal extraction yielded very few rows, try template
                 if len(table) <= 1:  # Only header or empty
-                    template_rows, template_table_number = extract_with_template(image_path, year_filter_value)
+                    template_rows, template_table_number = extract_with_template(ocr_image, year_filter_value)
                     if template_rows and len(template_rows) > 0:
                         table_number = template_table_number
                         table = [['C/R Table', 'Date', 'Doc No.', 'Orig Amount', 'Acc Amount']]
