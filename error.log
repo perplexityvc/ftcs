@@ -1,27 +1,13 @@
-[1/7] Preprocessing image...
-     Using Pillow for preprocessing
-     Preprocessed image saved to: C:\Users\463824\Downloads\preprocessed.png
-     ✓ Complete
-
-[2/7] Extracting C/R Table number...
-     ✓ C/R Table: N/A
-
-[3/7] Running OCR...
-Traceback (most recent call last):
-  File "C:\Users\463824\Downloads\extract.py", line 1370, in <module>
-    main(image_path, year_filter)
-  File "C:\Users\463824\Downloads\extract.py", line 838, in main
-    tsv_data = ocr_extract(ocr_image)
-               ^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\463824\Downloads\extract.py", line 171, in ocr_extract
-    result = subprocess.run(cmd, capture_output=True, text=True)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\463824\AppData\Local\Programs\Python\Python312\Lib\subprocess.py", line 548, in run
-    with Popen(*popenargs, **kwargs) as process:
-         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\463824\AppData\Local\Programs\Python\Python312\Lib\subprocess.py", line 1026, in __init__
-    self._execute_child(args, executable, preexec_fn, close_fds,
-  File "C:\Users\463824\AppData\Local\Programs\Python\Python312\Lib\subprocess.py", line 1538, in _execute_child
-    hp, ht, pid, tid = _winapi.CreateProcess(executable, args,
-                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-FileNotFoundError: [WinError 2] The system cannot find the file specified
+[15:28:46] [INFO] ============================================================
+Starting OCR extraction on captured screenshots...
+Command: C:\Users\shahrulfikri.yunus\Downloads\ftcs-main\ftcs\Scripts\python.exe C:\Users\shahrulfikri.yunus\Downloads\ftcs-main\ftcs-main\extract.py --batch C:\Users\shahrulfikri.yunus\Downloads\ftcs-main\ftcs-main\captured_screens C:\Users\shahrulfikri.yunus\Downloads\ftcs-main\ftcs-main\captured_screens\combined_output.csv
+OCR extraction failed with exit code 1
+Extractor error output:
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\shahrulfikri.yunus\Downloads\ftcs-main\ftcs-main\extract.py", line 1214, in batch_process_images
+    print(f"     \u2717 Error processing {image_name}: {e}")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\shahrulfikri.yunus\AppData\Local\Programs\Python\Python313\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\u2717' in position 5: character maps to <undefined>
