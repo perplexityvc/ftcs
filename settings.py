@@ -25,6 +25,13 @@ class OCRSettings:
     # OCR output format
     OUTPUT_FORMAT = 'tsv'  # Tab-separated values with positioning data
 
+    # Optional explicit Tesseract executable path.
+    # Leave empty to use PATH lookup.
+    # Windows examples:
+    #   TESSERACT_PATH = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+    #   TESSERACT_PATH = r'C:\Program Files\Tesseract-OCR'  # directory also supported
+    TESSERACT_PATH = ''
+
 
 # ============================================================================
 # IMAGE PREPROCESSING SETTINGS

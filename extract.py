@@ -7,6 +7,8 @@ Extracts accounting tables and creates formatted Excel output
 import subprocess
 import re
 import csv
+import sys
+import os
 
 # Import settings
 try:
@@ -27,6 +29,8 @@ except ImportError:
     ocr = Settings()
     ocr.CONFIDENCE_THRESHOLD = 15
     ocr.PSM_MODE = '6'
+    ocr.OUTPUT_FORMAT = 'tsv'
+    ocr.TESSERACT_PATH = ''
     
     preprocessing = Settings()
     preprocessing.PIL_THRESHOLD = 122
@@ -135,19 +139,62 @@ def preprocess_image(input_path, output_path):
         print(f"     Install with: pip install Pillow")
         print(f"     Using original image (OCR accuracy may be reduced)")
         return input_path
-        
+
     except Exception as e:
         if logging.SHOW_PROGRESS:
             print(f"     ⚠ Preprocessing failed: {e}")
             print(f"     Using original image")
         return input_path
 
+
+def _get_tesseract_candidates():
+    """Build ordered tesseract command candidates from settings and platform defaults."""
+    candidates = []
+
+    configured_path = getattr(ocr, 'TESSERACT_PATH', '')
+    if configured_path:
+        configured_path = configured_path.strip().strip('"')
+        if os.path.isdir(configured_path):
+            if sys.platform == 'win32':
+                candidates.append(os.path.join(configured_path, 'tesseract.exe'))
+            candidates.append(os.path.join(configured_path, 'tesseract'))
+        else:
+            candidates.append(configured_path)
+
+    if sys.platform == 'win32':
+        candidates.extend(['tesseract.exe', 'tesseract'])
+    else:
+        candidates.append('tesseract')
+
+    unique_candidates = []
+    for candidate in candidates:
+        if candidate and candidate not in unique_candidates:
+            unique_candidates.append(candidate)
+
+    return unique_candidates
+
+
+def _run_tesseract(args, capture_output=True, text=True, **kwargs):
+    """Run tesseract using configured path first, then platform fallbacks."""
+    commands_to_try = _get_tesseract_candidates()
+
+    last_error = None
+    for cmd_name in commands_to_try:
+        try:
+            cmd = [cmd_name] + args
+            return subprocess.run(cmd, capture_output=capture_output, text=text, **kwargs)
+        except FileNotFoundError as err:
+            last_error = err
+
+    if last_error:
+        raise last_error
+
+    raise FileNotFoundError("Tesseract executable not found")
+
 def extract_table_number(image_path):
     """Extract C/R Table number from image header using regex"""
-    # Run OCR on top portion only for speed
-    cmd = ['tesseract', image_path, 'stdout', '--psm', ocr.PSM_MODE]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = _run_tesseract([image_path, 'stdout', '--psm', ocr.PSM_MODE])
         ocr_text = result.stdout
         
         # Try each pattern from settings
@@ -167,8 +214,14 @@ def extract_table_number(image_path):
 
 def ocr_extract(image_path):
     """Extract text with Tesseract"""
-    cmd = ['tesseract', image_path, 'stdout', '--psm', ocr.PSM_MODE, ocr.OUTPUT_FORMAT]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = _run_tesseract([image_path, 'stdout', '--psm', ocr.PSM_MODE, ocr.OUTPUT_FORMAT])
+    except FileNotFoundError:
+        print("     ✗ Tesseract not found. Install it and ensure it is in PATH.")
+        if sys.platform == 'win32':
+            print("     On Windows, set OCRSettings.TESSERACT_PATH in settings.py or add Tesseract to PATH.")
+        return None
+
     return result.stdout if result.returncode == 0 else None
 
 def parse_ocr_output(tsv_data):
@@ -660,24 +713,11 @@ def extract_with_template(image_path, year_filter_value=None):
     Uses regex patterns to extract data from OCR text directly
     More reliable for tables with few rows where column detection fails
     """
-    import subprocess
-    import sys
-    
     # Get raw OCR text
-    # Windows-compatible: try tesseract.exe first, then tesseract
-    tesseract_cmd = 'tesseract.exe' if sys.platform == 'win32' else 'tesseract'
-    
     try:
-        cmd = [tesseract_cmd, image_path, 'stdout', '--psm', '6']
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False, encoding='utf-8')
+        result = _run_tesseract([image_path, 'stdout', '--psm', '6'], check=False, encoding='utf-8')
         text = result.stdout
-        
-        # If failed and on Windows, try without .exe
-        if not text and sys.platform == 'win32':
-            cmd = ['tesseract', image_path, 'stdout', '--psm', '6']
-            result = subprocess.run(cmd, capture_output=True, text=True, check=False, encoding='utf-8')
-            text = result.stdout
-        
+
         # DEBUG: Print OCR output length and preview
         if logging.SHOW_PROGRESS:
             lines_with_2025 = [l for l in text.split('\n') if '2025' in l]
