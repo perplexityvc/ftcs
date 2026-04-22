@@ -62,6 +62,10 @@ class PreprocessingSettings:
     MASK_TOP_RATIO = 0.33
     MASK_BOTTOM_RATIO = 0.15
 
+    # Save masked/preprocessed preview images for manual inspection
+    SAVE_MASKED_PREVIEW = True
+    MASKED_PREVIEW_DIR = 'masked_inspection'
+
 
 # ============================================================================
 # TABLE DETECTION SETTINGS

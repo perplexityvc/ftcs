@@ -9,6 +9,7 @@ import re
 import csv
 import sys
 import os
+import shutil
 import builtins
 
 
@@ -49,6 +50,8 @@ except ImportError:
     preprocessing.APPLY_VERTICAL_MASK = True
     preprocessing.MASK_TOP_RATIO = 0.33
     preprocessing.MASK_BOTTOM_RATIO = 0.15
+    preprocessing.SAVE_MASKED_PREVIEW = True
+    preprocessing.MASKED_PREVIEW_DIR = 'masked_inspection'
     
     table_detection = Settings()
     table_detection.ROW_GROUPING_TOLERANCE = 20
@@ -172,6 +175,28 @@ def preprocess_image(input_path, output_path):
             print(f"     ⚠ Preprocessing failed: {e}")
             print(f"     Using original image")
         return input_path
+
+
+def save_masked_preview(preprocessed_image_path, source_image_path):
+    """Save a copy of masked/preprocessed image for visual inspection."""
+    if not getattr(preprocessing, 'SAVE_MASKED_PREVIEW', True):
+        return None
+
+    try:
+        preview_dir = getattr(preprocessing, 'MASKED_PREVIEW_DIR', 'masked_inspection')
+        os.makedirs(preview_dir, exist_ok=True)
+
+        source_name = os.path.basename(source_image_path)
+        source_stem, source_ext = os.path.splitext(source_name)
+        ext = source_ext if source_ext else '.png'
+        preview_path = os.path.join(preview_dir, f"{source_stem}_masked{ext}")
+
+        shutil.copy2(preprocessed_image_path, preview_path)
+        return preview_path
+    except Exception as e:
+        if logging.SHOW_PROGRESS:
+            print(f"     ⚠ Could not save masked preview: {e}")
+        return None
 
 
 def _get_tesseract_candidates():
@@ -889,11 +914,14 @@ def main(input_image=None, year_filter_value=None):
     # Process
     print("\n[1/7] Preprocessing image...")
     ocr_image = preprocess_image(input_image, preprocessed)
+    preview_path = save_masked_preview(ocr_image, input_image)
     
     # Show absolute path for debugging
     import os
     abs_path = os.path.abspath(preprocessed)
     print(f"     Preprocessed image saved to: {abs_path}")
+    if preview_path:
+        print(f"     Masked preview saved to: {os.path.abspath(preview_path)}")
     print("     ✓ Complete")
     
     # Extract C/R Table number from original image (before preprocessing)
@@ -1136,6 +1164,9 @@ def batch_process_images(image_folder=None, output_csv=None, year_filter_value=N
             
             # Run extraction (simplified inline version)
             ocr_image = preprocess_image(input_image, preprocessed)
+            preview_path = save_masked_preview(ocr_image, input_image)
+            if preview_path:
+                print(f"     Masked preview: {os.path.abspath(preview_path)}")
             table_number = extract_table_number(input_image)
             print(f"     C/R Table: {table_number}")
             
