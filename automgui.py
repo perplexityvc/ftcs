@@ -47,6 +47,14 @@ class Config:
     # Stop condition for section switching
     TOP_REGION_RATIO = 0.33
     TOP_CHANGE_STOP_THRESHOLD = 0.20
+
+    # Feature toggles
+    REQUIRE_WINDOW_TITLE = True
+    ENABLE_ADAPTIVE_WAIT = True
+    ENABLE_UNCHANGED_SCREEN_STOP = True
+    ENABLE_TOP_CHANGE_GUARD = True
+    ENABLE_POST_PROCESSING = True
+    DISABLE_PROCESSING = False
     
     @classmethod
     def load_from_file(cls):
@@ -77,6 +85,12 @@ class Config:
             'adaptive_wait_interval': cls.ADAPTIVE_WAIT_INTERVAL,
             'top_region_ratio': cls.TOP_REGION_RATIO,
             'top_change_stop_threshold': cls.TOP_CHANGE_STOP_THRESHOLD,
+            'require_window_title': cls.REQUIRE_WINDOW_TITLE,
+            'enable_adaptive_wait': cls.ENABLE_ADAPTIVE_WAIT,
+            'enable_unchanged_screen_stop': cls.ENABLE_UNCHANGED_SCREEN_STOP,
+            'enable_top_change_guard': cls.ENABLE_TOP_CHANGE_GUARD,
+            'enable_post_processing': cls.ENABLE_POST_PROCESSING,
+            'disable_processing': cls.DISABLE_PROCESSING,
         }
         try:
             with open(cls.CONFIG_FILE, 'w') as f:
@@ -280,7 +294,11 @@ class AutomationEngine:
         pyautogui.press(key)
         time.sleep(self.config.SCROLL_DELAY)
         
-        if self.config.ADAPTIVE_WAIT_CHECKS > 0:
+        if (
+            not getattr(self.config, 'DISABLE_PROCESSING', False)
+            and getattr(self.config, 'ENABLE_ADAPTIVE_WAIT', True)
+            and self.config.ADAPTIVE_WAIT_CHECKS > 0
+        ):
             self.capture.wait_for_screen_stability(
                 delay=self.config.ADAPTIVE_WAIT_INTERVAL,
                 checks=self.config.ADAPTIVE_WAIT_CHECKS
@@ -318,31 +336,45 @@ class AutomationEngine:
             # Capture new screen
             new_img = self.capture.capture()
             
-            # Compare images
-            is_equal, method, score = self.comparator.compare(last_page_img, new_img)
-            self.stats['comparisons'] += 1
-            
-            if is_equal:
-                consecutive_identical += 1
-                self.log(f"Screen unchanged ({consecutive_identical}/"
-                       f"{self.config.MAX_CONSECUTIVE_IDENTICAL})")
-                
-                if consecutive_identical >= self.config.MAX_CONSECUTIVE_IDENTICAL:
-                    self.log("End of section detected (screen stopped changing)")
-                    break
+            if not getattr(self.config, 'DISABLE_PROCESSING', False):
+                # Compare images
+                is_equal, method, score = self.comparator.compare(last_page_img, new_img)
+                self.stats['comparisons'] += 1
+
+                if is_equal and getattr(self.config, 'ENABLE_UNCHANGED_SCREEN_STOP', True):
+                    consecutive_identical += 1
+                    self.log(f"Screen unchanged ({consecutive_identical}/"
+                           f"{self.config.MAX_CONSECUTIVE_IDENTICAL})")
+
+                    if consecutive_identical >= self.config.MAX_CONSECUTIVE_IDENTICAL:
+                        self.log("End of section detected (screen stopped changing)")
+                        break
+                else:
+                    consecutive_identical = 0
+                    page_count += 1
+                    self.stats['pages'] += 1
+
+                    filename = f"section_{self.section_count:03d}_page_{page_count:03d}.png"
+                    success, size = self.capture.save(new_img, filename)
+
+                    if success:
+                        self.log(f"Saved: {filename} ({size} bytes)")
+                    else:
+                        self.log(f"Failed to save {filename}", "WARNING")
+
+                    last_page_img = new_img
             else:
-                consecutive_identical = 0
                 page_count += 1
                 self.stats['pages'] += 1
-                
+
                 filename = f"section_{self.section_count:03d}_page_{page_count:03d}.png"
                 success, size = self.capture.save(new_img, filename)
-                
+
                 if success:
                     self.log(f"Saved: {filename} ({size} bytes)")
                 else:
                     self.log(f"Failed to save {filename}", "WARNING")
-                
+
                 last_page_img = new_img
         
         if page_count >= self.config.MAX_PAGES_PER_SECTION:
@@ -359,17 +391,22 @@ class AutomationEngine:
         
         next_img = self.capture.capture()
 
+        if getattr(self.config, 'DISABLE_PROCESSING', False):
+            self.log("Processing disabled: skipping section-change comparison")
+            return True
+
         # Guardrail: stop if top region changes too much
-        top_change_ratio = self.calculate_top_region_change_ratio(last_section_img, next_img)
-        threshold = float(getattr(self.config, 'TOP_CHANGE_STOP_THRESHOLD', 0.20))
-        if top_change_ratio > threshold:
-            self.log(
-                f"Top {int(getattr(self.config, 'TOP_REGION_RATIO', 0.33) * 100)}% changed "
-                f"by {top_change_ratio * 100:.1f}% (> {threshold * 100:.1f}%). Stopping capture.",
-                "WARNING",
-            )
-            self.should_stop = True
-            return False
+        if getattr(self.config, 'ENABLE_TOP_CHANGE_GUARD', True):
+            top_change_ratio = self.calculate_top_region_change_ratio(last_section_img, next_img)
+            threshold = float(getattr(self.config, 'TOP_CHANGE_STOP_THRESHOLD', 0.20))
+            if top_change_ratio > threshold:
+                self.log(
+                    f"Top {int(getattr(self.config, 'TOP_REGION_RATIO', 0.33) * 100)}% changed "
+                    f"by {top_change_ratio * 100:.1f}% (> {threshold * 100:.1f}%). Stopping capture.",
+                    "WARNING",
+                )
+                self.should_stop = True
+                return False
 
         is_same, method, score = self.comparator.compare(last_section_img, next_img)
         self.stats['comparisons'] += 1
@@ -504,9 +541,16 @@ class AutomationGUI:
         main_frame.rowconfigure(2, weight=1)
         
         # === Configuration Section ===
-        config_frame = ttk.LabelFrame(main_frame, text="Configuration", padding="10")
-        config_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N), pady=(0, 10))
+        config_notebook = ttk.Notebook(main_frame)
+        config_notebook.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N), pady=(0, 10))
+
+        config_frame = ttk.Frame(config_notebook, padding="10")
+        features_frame = ttk.Frame(config_notebook, padding="10")
+        config_notebook.add(config_frame, text="Capture Settings")
+        config_notebook.add(features_frame, text="Feature Toggles")
+
         config_frame.columnconfigure(1, weight=1)
+        features_frame.columnconfigure(0, weight=1)
         
         # Save Directory
         ttk.Label(config_frame, text="Save Directory:").grid(row=0, column=0, sticky=tk.W, pady=5)
@@ -571,6 +615,55 @@ class AutomationGUI:
                   command=self.load_config).pack(side=tk.LEFT, padx=5)
         ttk.Button(config_btn_frame, text="Reset to Defaults", 
                   command=self.reset_config).pack(side=tk.LEFT, padx=5)
+
+        # === Feature Toggles Tab ===
+        self.require_window_var = tk.BooleanVar(value=Config.REQUIRE_WINDOW_TITLE)
+        self.adaptive_wait_enabled_var = tk.BooleanVar(value=Config.ENABLE_ADAPTIVE_WAIT)
+        self.unchanged_stop_enabled_var = tk.BooleanVar(value=Config.ENABLE_UNCHANGED_SCREEN_STOP)
+        self.top_guard_enabled_var = tk.BooleanVar(value=Config.ENABLE_TOP_CHANGE_GUARD)
+        self.post_processing_enabled_var = tk.BooleanVar(value=Config.ENABLE_POST_PROCESSING)
+        self.disable_processing_var = tk.BooleanVar(value=Config.DISABLE_PROCESSING)
+
+        ttk.Checkbutton(
+            features_frame,
+            text="Require target window title before capture",
+            variable=self.require_window_var,
+        ).grid(row=0, column=0, sticky=tk.W, pady=4)
+
+        ttk.Checkbutton(
+            features_frame,
+            text="Enable adaptive wait after key press",
+            variable=self.adaptive_wait_enabled_var,
+        ).grid(row=1, column=0, sticky=tk.W, pady=4)
+
+        ttk.Checkbutton(
+            features_frame,
+            text="Stop section when screen remains unchanged",
+            variable=self.unchanged_stop_enabled_var,
+        ).grid(row=2, column=0, sticky=tk.W, pady=4)
+
+        ttk.Checkbutton(
+            features_frame,
+            text="Enable top-region change guard",
+            variable=self.top_guard_enabled_var,
+        ).grid(row=3, column=0, sticky=tk.W, pady=4)
+
+        ttk.Checkbutton(
+            features_frame,
+            text="Run OCR extraction after capture",
+            variable=self.post_processing_enabled_var,
+        ).grid(row=4, column=0, sticky=tk.W, pady=4)
+
+        ttk.Checkbutton(
+            features_frame,
+            text="Disable processing altogether (capture-only mode)",
+            variable=self.disable_processing_var,
+        ).grid(row=5, column=0, sticky=tk.W, pady=8)
+
+        ttk.Label(
+            features_frame,
+            text="Capture-only mode disables adaptive waits, stop guards, and OCR post-processing.",
+        ).grid(row=6, column=0, sticky=tk.W, pady=(2, 0))
         
         # === Control Section ===
         control_frame = ttk.LabelFrame(main_frame, text="Control", padding="10")
@@ -663,6 +756,12 @@ class AutomationGUI:
         Config.MAX_PAGES_PER_SECTION = self.max_pages_var.get()
         Config.MAX_SECTIONS = self.max_sections_var.get()
         Config.MAX_CONSECUTIVE_IDENTICAL = self.max_consecutive_var.get()
+        Config.REQUIRE_WINDOW_TITLE = self.require_window_var.get()
+        Config.ENABLE_ADAPTIVE_WAIT = self.adaptive_wait_enabled_var.get()
+        Config.ENABLE_UNCHANGED_SCREEN_STOP = self.unchanged_stop_enabled_var.get()
+        Config.ENABLE_TOP_CHANGE_GUARD = self.top_guard_enabled_var.get()
+        Config.ENABLE_POST_PROCESSING = self.post_processing_enabled_var.get()
+        Config.DISABLE_PROCESSING = self.disable_processing_var.get()
     
     def load_config_to_ui(self):
         """Load Config values to UI."""
@@ -674,6 +773,12 @@ class AutomationGUI:
         self.max_pages_var.set(Config.MAX_PAGES_PER_SECTION)
         self.max_sections_var.set(Config.MAX_SECTIONS)
         self.max_consecutive_var.set(Config.MAX_CONSECUTIVE_IDENTICAL)
+        self.require_window_var.set(Config.REQUIRE_WINDOW_TITLE)
+        self.adaptive_wait_enabled_var.set(Config.ENABLE_ADAPTIVE_WAIT)
+        self.unchanged_stop_enabled_var.set(Config.ENABLE_UNCHANGED_SCREEN_STOP)
+        self.top_guard_enabled_var.set(Config.ENABLE_TOP_CHANGE_GUARD)
+        self.post_processing_enabled_var.set(Config.ENABLE_POST_PROCESSING)
+        self.disable_processing_var.set(Config.DISABLE_PROCESSING)
     
     def save_config(self):
         """Save current configuration to file."""
@@ -702,6 +807,12 @@ class AutomationGUI:
             Config.MAX_CONSECUTIVE_IDENTICAL = 3
             Config.TOP_REGION_RATIO = 0.33
             Config.TOP_CHANGE_STOP_THRESHOLD = 0.20
+            Config.REQUIRE_WINDOW_TITLE = True
+            Config.ENABLE_ADAPTIVE_WAIT = True
+            Config.ENABLE_UNCHANGED_SCREEN_STOP = True
+            Config.ENABLE_TOP_CHANGE_GUARD = True
+            Config.ENABLE_POST_PROCESSING = True
+            Config.DISABLE_PROCESSING = False
             self.load_config_to_ui()
             self.log_message("Configuration reset to defaults")
     
@@ -719,7 +830,7 @@ class AutomationGUI:
             messagebox.showerror("Error", "Please specify a save directory!")
             return
 
-        if not self.target_window_var.get().strip():
+        if self.require_window_var.get() and not self.target_window_var.get().strip():
             messagebox.showerror("Error", "Please set a target window title (window-only capture is required)")
             return
         
@@ -741,7 +852,12 @@ class AutomationGUI:
         """Run automation (called in separate thread)."""
         try:
             self.engine.run()
-            self.run_extraction_after_capture()
+            if getattr(Config, 'DISABLE_PROCESSING', False):
+                self.thread_safe_log_message("Processing disabled: skipping OCR extraction")
+            elif not getattr(Config, 'ENABLE_POST_PROCESSING', True):
+                self.thread_safe_log_message("Post-processing disabled: skipping OCR extraction")
+            else:
+                self.run_extraction_after_capture()
         finally:
             # Update UI when done (must use after to run in main thread)
             self.root.after(0, self.automation_finished)
