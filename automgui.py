@@ -56,7 +56,12 @@ class Config:
     ENABLE_TOP_CHANGE_GUARD = True
     ENABLE_POST_PROCESSING = True
     ENABLE_IMAGE_PREPROCESSING = True
+    ENABLE_BINARIZATION = True
     DISABLE_PROCESSING = False
+
+    # OCR masking controls (percent)
+    MASK_TOP_PERCENT = 33.0
+    MASK_BOTTOM_PERCENT = 15.0
     
     @classmethod
     def load_from_file(cls):
@@ -94,7 +99,10 @@ class Config:
             'enable_top_change_guard': cls.ENABLE_TOP_CHANGE_GUARD,
             'enable_post_processing': cls.ENABLE_POST_PROCESSING,
             'enable_image_preprocessing': cls.ENABLE_IMAGE_PREPROCESSING,
+            'enable_binarization': cls.ENABLE_BINARIZATION,
             'disable_processing': cls.DISABLE_PROCESSING,
+            'mask_top_percent': cls.MASK_TOP_PERCENT,
+            'mask_bottom_percent': cls.MASK_BOTTOM_PERCENT,
         }
         try:
             with open(cls.CONFIG_FILE, 'w') as f:
@@ -652,7 +660,10 @@ class AutomationGUI:
         self.top_guard_enabled_var = tk.BooleanVar(value=Config.ENABLE_TOP_CHANGE_GUARD)
         self.post_processing_enabled_var = tk.BooleanVar(value=Config.ENABLE_POST_PROCESSING)
         self.image_preprocessing_enabled_var = tk.BooleanVar(value=Config.ENABLE_IMAGE_PREPROCESSING)
+        self.binarization_enabled_var = tk.BooleanVar(value=Config.ENABLE_BINARIZATION)
         self.disable_processing_var = tk.BooleanVar(value=Config.DISABLE_PROCESSING)
+        self.mask_top_percent_var = tk.DoubleVar(value=Config.MASK_TOP_PERCENT)
+        self.mask_bottom_percent_var = tk.DoubleVar(value=Config.MASK_BOTTOM_PERCENT)
 
         ttk.Checkbutton(
             features_frame,
@@ -692,14 +703,43 @@ class AutomationGUI:
 
         ttk.Checkbutton(
             features_frame,
+            text="Enable binarization (otherwise grayscale)",
+            variable=self.binarization_enabled_var,
+        ).grid(row=6, column=0, sticky=tk.W, pady=4)
+
+        mask_frame = ttk.Frame(features_frame)
+        mask_frame.grid(row=7, column=0, sticky=tk.W, pady=6)
+        ttk.Label(mask_frame, text="Mask top %:").grid(row=0, column=0, sticky=tk.W)
+        ttk.Spinbox(
+            mask_frame,
+            from_=0.0,
+            to=100.0,
+            increment=1.0,
+            width=8,
+            textvariable=self.mask_top_percent_var,
+            format="%.1f",
+        ).grid(row=0, column=1, sticky=tk.W, padx=(6, 18))
+        ttk.Label(mask_frame, text="Mask bottom %:").grid(row=0, column=2, sticky=tk.W)
+        ttk.Spinbox(
+            mask_frame,
+            from_=0.0,
+            to=100.0,
+            increment=1.0,
+            width=8,
+            textvariable=self.mask_bottom_percent_var,
+            format="%.1f",
+        ).grid(row=0, column=3, sticky=tk.W, padx=(6, 0))
+
+        ttk.Checkbutton(
+            features_frame,
             text="Disable processing altogether (capture-only mode)",
             variable=self.disable_processing_var,
-        ).grid(row=6, column=0, sticky=tk.W, pady=8)
+        ).grid(row=8, column=0, sticky=tk.W, pady=8)
 
         ttk.Label(
             features_frame,
             text="Capture-only mode disables adaptive waits, stop guards, and OCR post-processing.",
-        ).grid(row=7, column=0, sticky=tk.W, pady=(2, 0))
+        ).grid(row=9, column=0, sticky=tk.W, pady=(2, 0))
         
         # === Control Section ===
         control_frame = ttk.LabelFrame(main_frame, text="Control", padding="10")
@@ -893,7 +933,10 @@ class AutomationGUI:
         Config.ENABLE_TOP_CHANGE_GUARD = self.top_guard_enabled_var.get()
         Config.ENABLE_POST_PROCESSING = self.post_processing_enabled_var.get()
         Config.ENABLE_IMAGE_PREPROCESSING = self.image_preprocessing_enabled_var.get()
+        Config.ENABLE_BINARIZATION = self.binarization_enabled_var.get()
         Config.DISABLE_PROCESSING = self.disable_processing_var.get()
+        Config.MASK_TOP_PERCENT = float(self.mask_top_percent_var.get())
+        Config.MASK_BOTTOM_PERCENT = float(self.mask_bottom_percent_var.get())
     
     def load_config_to_ui(self):
         """Load Config values to UI."""
@@ -912,7 +955,10 @@ class AutomationGUI:
         self.top_guard_enabled_var.set(Config.ENABLE_TOP_CHANGE_GUARD)
         self.post_processing_enabled_var.set(Config.ENABLE_POST_PROCESSING)
         self.image_preprocessing_enabled_var.set(Config.ENABLE_IMAGE_PREPROCESSING)
+        self.binarization_enabled_var.set(Config.ENABLE_BINARIZATION)
         self.disable_processing_var.set(Config.DISABLE_PROCESSING)
+        self.mask_top_percent_var.set(Config.MASK_TOP_PERCENT)
+        self.mask_bottom_percent_var.set(Config.MASK_BOTTOM_PERCENT)
     
     def save_config(self):
         """Save current configuration to file."""
@@ -948,7 +994,10 @@ class AutomationGUI:
             Config.ENABLE_TOP_CHANGE_GUARD = True
             Config.ENABLE_POST_PROCESSING = True
             Config.ENABLE_IMAGE_PREPROCESSING = True
+            Config.ENABLE_BINARIZATION = True
             Config.DISABLE_PROCESSING = False
+            Config.MASK_TOP_PERCENT = 33.0
+            Config.MASK_BOTTOM_PERCENT = 15.0
             self.load_config_to_ui()
             self.log_message("Configuration reset to defaults")
     
@@ -1019,6 +1068,13 @@ class AutomationGUI:
         cmd = [sys.executable, extract_script, '--batch', capture_dir, output_csv]
         if not getattr(Config, 'ENABLE_IMAGE_PREPROCESSING', True):
             cmd.append('--no-preprocess')
+        else:
+            if not getattr(Config, 'ENABLE_BINARIZATION', True):
+                cmd.append('--grayscale-only')
+
+            mask_top = max(0.0, min(100.0, float(getattr(Config, 'MASK_TOP_PERCENT', 33.0))))
+            mask_bottom = max(0.0, min(100.0, float(getattr(Config, 'MASK_BOTTOM_PERCENT', 15.0))))
+            cmd.extend(['--mask-top', f'{mask_top:.2f}', '--mask-bottom', f'{mask_bottom:.2f}'])
 
         self.thread_safe_set_status("Running OCR extraction...")
         self.thread_safe_log_message("Starting OCR extraction on captured screenshots...")

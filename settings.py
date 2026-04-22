@@ -56,6 +56,11 @@ class PreprocessingSettings:
     # False = no sharpening
     APPLY_SHARPENING = True
 
+    # Binarization mode
+    # True = threshold to black/white before OCR
+    # False = keep grayscale image
+    APPLY_BINARIZATION = True
+
     # Vertical masking before OCR
     # Top and bottom portions are blacked out on preprocessed images
     APPLY_VERTICAL_MASK = True

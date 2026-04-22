@@ -47,6 +47,7 @@ except ImportError:
     preprocessing.PIL_THRESHOLD = 122
     preprocessing.CONTRAST_ENHANCEMENT = 1.2
     preprocessing.APPLY_SHARPENING = True
+    preprocessing.APPLY_BINARIZATION = True
     preprocessing.APPLY_VERTICAL_MASK = True
     preprocessing.MASK_TOP_RATIO = 0.33
     preprocessing.MASK_BOTTOM_RATIO = 0.15
@@ -110,7 +111,7 @@ except ImportError:
     validation = Settings()
 
 
-def preprocess_image(input_path, output_path):
+def preprocess_image(input_path, output_path, use_binarization=None, mask_top_ratio=None, mask_bottom_ratio=None):
     """Preprocess green-on-black terminal image using Pillow"""
     
     try:
@@ -121,16 +122,22 @@ def preprocess_image(input_path, output_path):
         
         # Convert to grayscale
         img = img.convert('L')
-        
-        # Invert colors (green-on-black → black-on-white)
-        img = ImageOps.invert(img)
-        
-        # Apply threshold (binary conversion)
-        threshold = preprocessing.PIL_THRESHOLD  # From settings (default 122 = 48% of 255)
-        img = img.point(lambda x: 255 if x > threshold else 0, mode='1')
-        
-        # Convert back to grayscale for better OCR
-        img = img.convert('L')
+
+        apply_binarization = (
+            getattr(preprocessing, 'APPLY_BINARIZATION', True)
+            if use_binarization is None else bool(use_binarization)
+        )
+
+        if apply_binarization:
+            # Invert colors (green-on-black -> black-on-white)
+            img = ImageOps.invert(img)
+
+            # Apply threshold (binary conversion)
+            threshold = preprocessing.PIL_THRESHOLD  # From settings (default 122 = 48% of 255)
+            img = img.point(lambda x: 255 if x > threshold else 0, mode='1')
+
+            # Convert back to grayscale for better OCR
+            img = img.convert('L')
         
         # Apply sharpening if enabled
         if preprocessing.APPLY_SHARPENING:
@@ -144,8 +151,10 @@ def preprocess_image(input_path, output_path):
         # Apply vertical masking before OCR
         if getattr(preprocessing, 'APPLY_VERTICAL_MASK', True):
             width, height = img.size
-            top_pixels = int(height * float(getattr(preprocessing, 'MASK_TOP_RATIO', 0.33)))
-            bottom_pixels = int(height * float(getattr(preprocessing, 'MASK_BOTTOM_RATIO', 0.15)))
+            top_ratio = float(getattr(preprocessing, 'MASK_TOP_RATIO', 0.33) if mask_top_ratio is None else mask_top_ratio)
+            bottom_ratio = float(getattr(preprocessing, 'MASK_BOTTOM_RATIO', 0.15) if mask_bottom_ratio is None else mask_bottom_ratio)
+            top_pixels = int(height * max(0.0, min(1.0, top_ratio)))
+            bottom_pixels = int(height * max(0.0, min(1.0, bottom_ratio)))
             draw = ImageDraw.Draw(img)
 
             if top_pixels > 0:
@@ -892,7 +901,14 @@ def should_use_template_extraction(words, rows):
     # return False
 
 
-def main(input_image=None, year_filter_value=None, use_preprocessing=True):
+def main(
+    input_image=None,
+    year_filter_value=None,
+    use_preprocessing=True,
+    use_binarization=True,
+    mask_top_ratio=None,
+    mask_bottom_ratio=None,
+):
     import time
     start_time = time.time()
     
@@ -914,7 +930,13 @@ def main(input_image=None, year_filter_value=None, use_preprocessing=True):
     # Process
     if use_preprocessing:
         print("\n[1/7] Preprocessing image...")
-        ocr_image = preprocess_image(input_image, preprocessed)
+        ocr_image = preprocess_image(
+            input_image,
+            preprocessed,
+            use_binarization=use_binarization,
+            mask_top_ratio=mask_top_ratio,
+            mask_bottom_ratio=mask_bottom_ratio,
+        )
         preview_path = save_masked_preview(ocr_image, input_image)
 
         # Show absolute path for debugging
@@ -1103,7 +1125,15 @@ def main(input_image=None, year_filter_value=None, use_preprocessing=True):
     
     return elapsed, len(table) - 1  # Return timing and row count
 
-def batch_process_images(image_folder=None, output_csv=None, year_filter_value=None, use_preprocessing=True):
+def batch_process_images(
+    image_folder=None,
+    output_csv=None,
+    year_filter_value=None,
+    use_preprocessing=True,
+    use_binarization=True,
+    mask_top_ratio=None,
+    mask_bottom_ratio=None,
+):
     """Process all images in a folder and combine results into single CSV"""
     import glob
     import os
@@ -1171,7 +1201,13 @@ def batch_process_images(image_folder=None, output_csv=None, year_filter_value=N
             
             # Run extraction (simplified inline version)
             if use_preprocessing:
-                ocr_image = preprocess_image(input_image, preprocessed)
+                ocr_image = preprocess_image(
+                    input_image,
+                    preprocessed,
+                    use_binarization=use_binarization,
+                    mask_top_ratio=mask_top_ratio,
+                    mask_bottom_ratio=mask_bottom_ratio,
+                )
                 preview_path = save_masked_preview(ocr_image, input_image)
                 if preview_path:
                     print(f"     Masked preview: {os.path.abspath(preview_path)}")
@@ -1369,6 +1405,30 @@ def batch_process_images(image_folder=None, output_csv=None, year_filter_value=N
     if hasattr(logging, 'VERBOSE_MODE'):
         logging.VERBOSE_MODE = original_verbose
 
+
+def _parse_cli_float_option(argv, option_name):
+    """Parse float value after a CLI option."""
+    if option_name not in argv:
+        return None
+
+    idx = argv.index(option_name)
+    if len(argv) <= idx + 1:
+        raise ValueError(f"{option_name} requires a numeric value")
+
+    try:
+        return float(argv[idx + 1])
+    except ValueError as exc:
+        raise ValueError(f"{option_name} must be a number") from exc
+
+
+def _parse_mask_ratio(percent_value, option_name):
+    """Convert mask percentage (0-100) to ratio (0-1)."""
+    if percent_value is None:
+        return None
+    if percent_value < 0.0 or percent_value > 100.0:
+        raise ValueError(f"{option_name} must be between 0 and 100")
+    return percent_value / 100.0
+
 if __name__ == "__main__":
     import sys
     
@@ -1393,10 +1453,13 @@ USAGE:
    python extract.py --batch output.csv --year 2020
 
 OPTIONS:
-   --year YYYY       Filter results to only include specified year
-   --batch           Process all PNG images in a folder
-   --no-preprocess   Disable image preprocessing/masking before OCR
-   --help, -h        Show this help message
+   --year YYYY          Filter results to only include specified year
+   --batch              Process all PNG images in a folder
+   --no-preprocess      Disable image preprocessing/masking before OCR
+   --grayscale-only     Disable binarization and keep grayscale image
+   --mask-top PERCENT   Mask top percentage (0-100, default from settings)
+   --mask-bottom PERCENT Mask bottom percentage (0-100, default from settings)
+   --help, -h           Show this help message
 
 DEFAULT SETTINGS (configured in settings.py):
    Input folder:  {paths.DEFAULT_INPUT_FOLDER}
@@ -1460,7 +1523,24 @@ EXAMPLES:
                 year_filter_value = sys.argv[year_idx + 1]
         
         use_preprocessing = '--no-preprocess' not in sys.argv
-        batch_process_images(folder_path, output_file, year_filter_value, use_preprocessing)
+        use_binarization = '--grayscale-only' not in sys.argv
+
+        try:
+            mask_top_ratio = _parse_mask_ratio(_parse_cli_float_option(sys.argv, '--mask-top'), '--mask-top')
+            mask_bottom_ratio = _parse_mask_ratio(_parse_cli_float_option(sys.argv, '--mask-bottom'), '--mask-bottom')
+        except ValueError as e:
+            print(f"✗ {e}")
+            sys.exit(1)
+
+        batch_process_images(
+            folder_path,
+            output_file,
+            year_filter_value,
+            use_preprocessing,
+            use_binarization,
+            mask_top_ratio,
+            mask_bottom_ratio,
+        )
     
     else:
         # Single image mode
@@ -1480,7 +1560,25 @@ EXAMPLES:
         if image_path:
             print(f"Using custom image: {image_path}")
             use_preprocessing = '--no-preprocess' not in sys.argv
-            main(image_path, year_filter, use_preprocessing)
+            use_binarization = '--grayscale-only' not in sys.argv
+
+            try:
+                mask_top_ratio = _parse_mask_ratio(_parse_cli_float_option(sys.argv, '--mask-top'), '--mask-top')
+                mask_bottom_ratio = _parse_mask_ratio(_parse_cli_float_option(sys.argv, '--mask-bottom'), '--mask-bottom')
+            except ValueError as e:
+                print(f"✗ {e}")
+                sys.exit(1)
+
+            main(image_path, year_filter, use_preprocessing, use_binarization, mask_top_ratio, mask_bottom_ratio)
         else:
             use_preprocessing = '--no-preprocess' not in sys.argv
-            main(None, year_filter, use_preprocessing)
+            use_binarization = '--grayscale-only' not in sys.argv
+
+            try:
+                mask_top_ratio = _parse_mask_ratio(_parse_cli_float_option(sys.argv, '--mask-top'), '--mask-top')
+                mask_bottom_ratio = _parse_mask_ratio(_parse_cli_float_option(sys.argv, '--mask-bottom'), '--mask-bottom')
+            except ValueError as e:
+                print(f"✗ {e}")
+                sys.exit(1)
+
+            main(None, year_filter, use_preprocessing, use_binarization, mask_top_ratio, mask_bottom_ratio)
