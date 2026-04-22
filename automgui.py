@@ -54,6 +54,7 @@ class Config:
     ENABLE_UNCHANGED_SCREEN_STOP = True
     ENABLE_TOP_CHANGE_GUARD = True
     ENABLE_POST_PROCESSING = True
+    ENABLE_IMAGE_PREPROCESSING = True
     DISABLE_PROCESSING = False
     
     @classmethod
@@ -90,6 +91,7 @@ class Config:
             'enable_unchanged_screen_stop': cls.ENABLE_UNCHANGED_SCREEN_STOP,
             'enable_top_change_guard': cls.ENABLE_TOP_CHANGE_GUARD,
             'enable_post_processing': cls.ENABLE_POST_PROCESSING,
+            'enable_image_preprocessing': cls.ENABLE_IMAGE_PREPROCESSING,
             'disable_processing': cls.DISABLE_PROCESSING,
         }
         try:
@@ -622,6 +624,7 @@ class AutomationGUI:
         self.unchanged_stop_enabled_var = tk.BooleanVar(value=Config.ENABLE_UNCHANGED_SCREEN_STOP)
         self.top_guard_enabled_var = tk.BooleanVar(value=Config.ENABLE_TOP_CHANGE_GUARD)
         self.post_processing_enabled_var = tk.BooleanVar(value=Config.ENABLE_POST_PROCESSING)
+        self.image_preprocessing_enabled_var = tk.BooleanVar(value=Config.ENABLE_IMAGE_PREPROCESSING)
         self.disable_processing_var = tk.BooleanVar(value=Config.DISABLE_PROCESSING)
 
         ttk.Checkbutton(
@@ -656,14 +659,20 @@ class AutomationGUI:
 
         ttk.Checkbutton(
             features_frame,
+            text="Enable image preprocessing for OCR",
+            variable=self.image_preprocessing_enabled_var,
+        ).grid(row=5, column=0, sticky=tk.W, pady=4)
+
+        ttk.Checkbutton(
+            features_frame,
             text="Disable processing altogether (capture-only mode)",
             variable=self.disable_processing_var,
-        ).grid(row=5, column=0, sticky=tk.W, pady=8)
+        ).grid(row=6, column=0, sticky=tk.W, pady=8)
 
         ttk.Label(
             features_frame,
             text="Capture-only mode disables adaptive waits, stop guards, and OCR post-processing.",
-        ).grid(row=6, column=0, sticky=tk.W, pady=(2, 0))
+        ).grid(row=7, column=0, sticky=tk.W, pady=(2, 0))
         
         # === Control Section ===
         control_frame = ttk.LabelFrame(main_frame, text="Control", padding="10")
@@ -761,6 +770,7 @@ class AutomationGUI:
         Config.ENABLE_UNCHANGED_SCREEN_STOP = self.unchanged_stop_enabled_var.get()
         Config.ENABLE_TOP_CHANGE_GUARD = self.top_guard_enabled_var.get()
         Config.ENABLE_POST_PROCESSING = self.post_processing_enabled_var.get()
+        Config.ENABLE_IMAGE_PREPROCESSING = self.image_preprocessing_enabled_var.get()
         Config.DISABLE_PROCESSING = self.disable_processing_var.get()
     
     def load_config_to_ui(self):
@@ -778,6 +788,7 @@ class AutomationGUI:
         self.unchanged_stop_enabled_var.set(Config.ENABLE_UNCHANGED_SCREEN_STOP)
         self.top_guard_enabled_var.set(Config.ENABLE_TOP_CHANGE_GUARD)
         self.post_processing_enabled_var.set(Config.ENABLE_POST_PROCESSING)
+        self.image_preprocessing_enabled_var.set(Config.ENABLE_IMAGE_PREPROCESSING)
         self.disable_processing_var.set(Config.DISABLE_PROCESSING)
     
     def save_config(self):
@@ -812,6 +823,7 @@ class AutomationGUI:
             Config.ENABLE_UNCHANGED_SCREEN_STOP = True
             Config.ENABLE_TOP_CHANGE_GUARD = True
             Config.ENABLE_POST_PROCESSING = True
+            Config.ENABLE_IMAGE_PREPROCESSING = True
             Config.DISABLE_PROCESSING = False
             self.load_config_to_ui()
             self.log_message("Configuration reset to defaults")
@@ -881,6 +893,8 @@ class AutomationGUI:
 
         output_csv = os.path.join(capture_dir, 'combined_output.csv')
         cmd = [sys.executable, extract_script, '--batch', capture_dir, output_csv]
+        if not getattr(Config, 'ENABLE_IMAGE_PREPROCESSING', True):
+            cmd.append('--no-preprocess')
 
         self.thread_safe_set_status("Running OCR extraction...")
         self.thread_safe_log_message("Starting OCR extraction on captured screenshots...")

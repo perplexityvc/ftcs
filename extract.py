@@ -892,7 +892,7 @@ def should_use_template_extraction(words, rows):
     # return False
 
 
-def main(input_image=None, year_filter_value=None):
+def main(input_image=None, year_filter_value=None, use_preprocessing=True):
     import time
     start_time = time.time()
     
@@ -912,17 +912,24 @@ def main(input_image=None, year_filter_value=None):
     excel_generator = paths.EXCEL_GENERATOR_SCRIPT
     
     # Process
-    print("\n[1/7] Preprocessing image...")
-    ocr_image = preprocess_image(input_image, preprocessed)
-    preview_path = save_masked_preview(ocr_image, input_image)
-    
-    # Show absolute path for debugging
-    import os
-    abs_path = os.path.abspath(preprocessed)
-    print(f"     Preprocessed image saved to: {abs_path}")
-    if preview_path:
-        print(f"     Masked preview saved to: {os.path.abspath(preview_path)}")
-    print("     ✓ Complete")
+    if use_preprocessing:
+        print("\n[1/7] Preprocessing image...")
+        ocr_image = preprocess_image(input_image, preprocessed)
+        preview_path = save_masked_preview(ocr_image, input_image)
+
+        # Show absolute path for debugging
+        import os
+        abs_path = os.path.abspath(preprocessed)
+        print(f"     Preprocessed image saved to: {abs_path}")
+        if preview_path:
+            print(f"     Masked preview saved to: {os.path.abspath(preview_path)}")
+        print("     ✓ Complete")
+    else:
+        print("\n[1/7] Preprocessing image...")
+        print("     Preprocessing disabled (--no-preprocess)")
+        ocr_image = input_image
+        preview_path = None
+        print("     ✓ Using original image for OCR")
     
     # Extract C/R Table number from original image (before preprocessing)
     print("\n[2/7] Extracting C/R Table number...")
@@ -1096,7 +1103,7 @@ def main(input_image=None, year_filter_value=None):
     
     return elapsed, len(table) - 1  # Return timing and row count
 
-def batch_process_images(image_folder=None, output_csv=None, year_filter_value=None):
+def batch_process_images(image_folder=None, output_csv=None, year_filter_value=None, use_preprocessing=True):
     """Process all images in a folder and combine results into single CSV"""
     import glob
     import os
@@ -1163,10 +1170,14 @@ def batch_process_images(image_folder=None, output_csv=None, year_filter_value=N
             excel_generator = 'create_excel.py'
             
             # Run extraction (simplified inline version)
-            ocr_image = preprocess_image(input_image, preprocessed)
-            preview_path = save_masked_preview(ocr_image, input_image)
-            if preview_path:
-                print(f"     Masked preview: {os.path.abspath(preview_path)}")
+            if use_preprocessing:
+                ocr_image = preprocess_image(input_image, preprocessed)
+                preview_path = save_masked_preview(ocr_image, input_image)
+                if preview_path:
+                    print(f"     Masked preview: {os.path.abspath(preview_path)}")
+            else:
+                print("     Preprocessing disabled (--no-preprocess)")
+                ocr_image = input_image
             table_number = extract_table_number(input_image)
             print(f"     C/R Table: {table_number}")
             
@@ -1382,9 +1393,10 @@ USAGE:
    python extract.py --batch output.csv --year 2020
 
 OPTIONS:
-   --year YYYY    Filter results to only include specified year
-   --batch        Process all PNG images in a folder
-   --help, -h     Show this help message
+   --year YYYY       Filter results to only include specified year
+   --batch           Process all PNG images in a folder
+   --no-preprocess   Disable image preprocessing/masking before OCR
+   --help, -h        Show this help message
 
 DEFAULT SETTINGS (configured in settings.py):
    Input folder:  {paths.DEFAULT_INPUT_FOLDER}
@@ -1447,7 +1459,8 @@ EXAMPLES:
             if len(sys.argv) > year_idx + 1:
                 year_filter_value = sys.argv[year_idx + 1]
         
-        batch_process_images(folder_path, output_file, year_filter_value)
+        use_preprocessing = '--no-preprocess' not in sys.argv
+        batch_process_images(folder_path, output_file, year_filter_value, use_preprocessing)
     
     else:
         # Single image mode
@@ -1466,6 +1479,8 @@ EXAMPLES:
         
         if image_path:
             print(f"Using custom image: {image_path}")
-            main(image_path, year_filter)
+            use_preprocessing = '--no-preprocess' not in sys.argv
+            main(image_path, year_filter, use_preprocessing)
         else:
-            main(None, year_filter)
+            use_preprocessing = '--no-preprocess' not in sys.argv
+            main(None, year_filter, use_preprocessing)
