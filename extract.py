@@ -54,6 +54,7 @@ except ImportError:
     preprocessing.SAVE_MASKED_PREVIEW = True
     preprocessing.MASKED_PREVIEW_DIR = 'masked_inspection'
     preprocessing.MASKED_PREVIEW_GRAYSCALE = False
+    preprocessing.MASKED_PREVIEW_SHOW_BBOXES = True
     
     table_detection = Settings()
     table_detection.ROW_GROUPING_TOLERANCE = 20
@@ -187,6 +188,130 @@ def preprocess_image(input_path, output_path, use_binarization=None, mask_top_ra
         return input_path
 
 
+def _parse_tsv_for_bboxes(tsv_data):
+    """Parse Tesseract TSV output into list of bbox dicts.
+
+    Returns list of {left, top, width, height, conf, text} for all
+    word-level entries (level==5) with valid confidence.
+    """
+    boxes = []
+    for line in tsv_data.strip().split('\n')[1:]:
+        parts = line.split('\t')
+        if len(parts) < 12:
+            continue
+        try:
+            level = int(parts[0])
+            if level != 5:          # word-level only
+                continue
+            conf = float(parts[10])
+            if conf < 0:            # -1 = non-word block entry
+                continue
+            text = parts[11].strip()
+            if not text:
+                continue
+            boxes.append({
+                'left':   int(parts[6]),
+                'top':    int(parts[7]),
+                'width':  int(parts[8]),
+                'height': int(parts[9]),
+                'conf':   conf,
+                'text':   text,
+            })
+        except (ValueError, IndexError):
+            continue
+    return boxes
+
+
+def draw_ocr_bboxes_on_image(pil_img, source_image_path):
+    """Overlay OCR bounding boxes and confidence labels on a PIL image.
+
+    Runs Tesseract TSV on *source_image_path* (the original capture so
+    coordinates are in original-image space), then draws colored rectangles
+    and confidence percentages on *pil_img* (the color masked preview).
+
+    Color coding:
+      green  (0, 200, 0)   — confidence >= 80 %
+      yellow (220, 180, 0) — confidence  50 – 79 %
+      red    (220, 0, 0)   — confidence  < 50 %
+    """
+    try:
+        from PIL import ImageDraw, ImageFont
+
+        # Run Tesseract TSV on the original source image
+        result = _run_tesseract(
+            [source_image_path, 'stdout', '--psm', ocr.PSM_MODE, 'tsv'],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return pil_img
+
+        boxes = _parse_tsv_for_bboxes(result.stdout)
+        if not boxes:
+            return pil_img
+
+        # Scale factor in case pil_img has been resized vs source
+        src_w, src_h = pil_img.size
+        try:
+            from PIL import Image as _PILImage
+            with _PILImage.open(source_image_path) as _src:
+                orig_w, orig_h = _src.size
+        except Exception:
+            orig_w, orig_h = src_w, src_h
+
+        scale_x = src_w / orig_w if orig_w > 0 else 1.0
+        scale_y = src_h / orig_h if orig_h > 0 else 1.0
+
+        draw = ImageDraw.Draw(pil_img)
+
+        # Try to load a small font; fall back to default
+        font = None
+        font_small = None
+        try:
+            font = ImageFont.truetype("arial.ttf", 11)
+            font_small = font
+        except Exception:
+            try:
+                font = ImageFont.load_default()
+                font_small = font
+            except Exception:
+                font = None
+
+        for box in boxes:
+            conf = box['conf']
+
+            if conf >= 80:
+                color = (0, 200, 0)       # green
+            elif conf >= 50:
+                color = (220, 180, 0)     # yellow
+            else:
+                color = (220, 0, 0)       # red
+
+            x0 = int(box['left']   * scale_x)
+            y0 = int(box['top']    * scale_y)
+            x1 = int((box['left'] + box['width'])  * scale_x)
+            y1 = int((box['top']  + box['height']) * scale_y)
+
+            draw.rectangle([x0, y0, x1, y1], outline=color, width=1)
+
+            label = f"{conf:.0f}%"
+            label_y = max(0, y0 - 12)
+            if font:
+                draw.text((x0, label_y), label, fill=color, font=font)
+            else:
+                draw.text((x0, label_y), label, fill=color)
+
+        return pil_img
+
+    except FileNotFoundError:
+        # Tesseract not available — skip boxes silently
+        return pil_img
+    except Exception as e:
+        if logging.SHOW_PROGRESS:
+            print(f"     ⚠ Could not draw OCR bounding boxes: {e}")
+        return pil_img
+
+
 def save_masked_preview(preprocessed_image_path, source_image_path):
     """Save a color-masked preview of the original captured image.
 
@@ -227,6 +352,10 @@ def save_masked_preview(preprocessed_image_path, source_image_path):
             if bottom_pixels > 0:
                 start_y = max(0, height - bottom_pixels)
                 draw.rectangle([0, start_y, width - 1, height - 1], fill=0)
+
+        # Draw OCR bounding boxes with confidence if enabled
+        if getattr(preprocessing, 'MASKED_PREVIEW_SHOW_BBOXES', True):
+            img = draw_ocr_bboxes_on_image(img, source_image_path)
 
         img.save(preview_path)
         return preview_path
@@ -1559,6 +1688,8 @@ EXAMPLES:
         use_binarization = '--grayscale-only' not in sys.argv
         if '--preview-grayscale' in sys.argv:
             preprocessing.MASKED_PREVIEW_GRAYSCALE = True
+        if '--no-preview-bboxes' in sys.argv:
+            preprocessing.MASKED_PREVIEW_SHOW_BBOXES = False
 
         try:
             mask_top_ratio = _parse_mask_ratio(_parse_cli_float_option(sys.argv, '--mask-top'), '--mask-top')
@@ -1596,6 +1727,8 @@ EXAMPLES:
         use_binarization = '--grayscale-only' not in sys.argv
         if '--preview-grayscale' in sys.argv:
             preprocessing.MASKED_PREVIEW_GRAYSCALE = True
+        if '--no-preview-bboxes' in sys.argv:
+            preprocessing.MASKED_PREVIEW_SHOW_BBOXES = False
 
         try:
             mask_top_ratio = _parse_mask_ratio(_parse_cli_float_option(sys.argv, '--mask-top'), '--mask-top')

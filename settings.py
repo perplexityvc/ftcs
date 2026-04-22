@@ -76,6 +76,10 @@ class PreprocessingSettings:
     # True  = save preview in grayscale
     MASKED_PREVIEW_GRAYSCALE = False
 
+    # Draw OCR bounding boxes and confidence on masked preview image
+    # Boxes are color-coded: green >= 80%, yellow 50-79%, red < 50%
+    MASKED_PREVIEW_SHOW_BBOXES = True
+
 
 # ============================================================================
 # TABLE DETECTION SETTINGS
