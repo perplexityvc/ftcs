@@ -570,7 +570,7 @@ class AutomationGUI:
         target_frame.grid(row=1, column=1, sticky=(tk.W, tk.E), pady=5)
         target_frame.columnconfigure(0, weight=1)
         ttk.Entry(target_frame, textvariable=self.target_window_var).grid(row=0, column=0, sticky=(tk.W, tk.E), padx=(0, 5))
-        ttk.Button(target_frame, text="Use Active", command=self.use_active_window, width=10).grid(row=0, column=1)
+        ttk.Button(target_frame, text="Select...", command=self.use_active_window, width=10).grid(row=0, column=1)
         
         # Scroll Delay
         ttk.Label(config_frame, text="Scroll Delay (sec):").grid(row=2, column=0, sticky=tk.W, pady=5)
@@ -718,24 +718,91 @@ class AutomationGUI:
             self.save_dir_var.set(directory)
 
     def use_active_window(self):
-        """Set target window title from currently active window."""
+        """Open a picker to explicitly choose the target window."""
         if gw is None:
-            messagebox.showerror("Error", "pygetwindow is required to select active window")
+            messagebox.showerror("Error", "pygetwindow is required to select a target window")
             return
 
         try:
             active = gw.getActiveWindow()
-            title = active.title.strip() if active and active.title else ""
+            active_title = active.title.strip() if active and active.title else ""
+            titles = self.get_selectable_window_titles()
         except Exception as e:
-            messagebox.showerror("Error", f"Could not read active window: {e}")
+            messagebox.showerror("Error", f"Could not read available windows: {e}")
             return
 
+        if not titles:
+            messagebox.showwarning("Warning", "No selectable application windows found")
+            return
+
+        title = self.show_window_picker(titles, active_title)
         if not title:
-            messagebox.showwarning("Warning", "No active window title detected")
             return
 
         self.target_window_var.set(title)
         self.log_message(f"Target window set to: {title}")
+
+    def get_selectable_window_titles(self):
+        """Return unique non-empty window titles for explicit selection."""
+        titles = []
+        for title in gw.getAllTitles():
+            cleaned = title.strip()
+            if cleaned:
+                titles.append(cleaned)
+
+        unique_titles = []
+        for title in titles:
+            if title not in unique_titles:
+                unique_titles.append(title)
+
+        return unique_titles
+
+    def show_window_picker(self, titles, active_title=""):
+        """Show a modal picker and return selected title or None."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Select Target Window")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.geometry("620x420")
+
+        ttk.Label(dialog, text="Choose the application window to capture:").pack(anchor=tk.W, padx=10, pady=(10, 6))
+
+        listbox = tk.Listbox(dialog, exportselection=False)
+        listbox.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
+        for title in titles:
+            listbox.insert(tk.END, title)
+
+        if active_title and active_title in titles:
+            idx = titles.index(active_title)
+            listbox.selection_set(idx)
+            listbox.see(idx)
+        elif titles:
+            listbox.selection_set(0)
+
+        selected = {'value': None}
+
+        def confirm_selection():
+            selection = listbox.curselection()
+            if not selection:
+                messagebox.showwarning("Warning", "Please select a window title", parent=dialog)
+                return
+            selected['value'] = titles[selection[0]]
+            dialog.destroy()
+
+        def cancel_selection():
+            dialog.destroy()
+
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
+        ttk.Button(btn_frame, text="Cancel", command=cancel_selection).pack(side=tk.RIGHT)
+        ttk.Button(btn_frame, text="Select", command=confirm_selection).pack(side=tk.RIGHT, padx=(0, 6))
+
+        listbox.bind('<Double-Button-1>', lambda _event: confirm_selection())
+        dialog.protocol("WM_DELETE_WINDOW", cancel_selection)
+        self.root.wait_window(dialog)
+
+        return selected['value']
     
     def log_message(self, message):
         """Add message to log text widget."""
