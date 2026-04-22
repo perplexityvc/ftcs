@@ -71,6 +71,11 @@ class PreprocessingSettings:
     SAVE_MASKED_PREVIEW = True
     MASKED_PREVIEW_DIR = 'masked_inspection'
 
+    # Masked preview color mode
+    # False = save preview in original color (default, for visual inspection)
+    # True  = save preview in grayscale
+    MASKED_PREVIEW_GRAYSCALE = False
+
 
 # ============================================================================
 # TABLE DETECTION SETTINGS

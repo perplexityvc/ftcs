@@ -53,6 +53,7 @@ except ImportError:
     preprocessing.MASK_BOTTOM_RATIO = 0.15
     preprocessing.SAVE_MASKED_PREVIEW = True
     preprocessing.MASKED_PREVIEW_DIR = 'masked_inspection'
+    preprocessing.MASKED_PREVIEW_GRAYSCALE = False
     
     table_detection = Settings()
     table_detection.ROW_GROUPING_TOLERANCE = 20
@@ -187,11 +188,17 @@ def preprocess_image(input_path, output_path, use_binarization=None, mask_top_ra
 
 
 def save_masked_preview(preprocessed_image_path, source_image_path):
-    """Save a copy of masked/preprocessed image for visual inspection."""
+    """Save a color-masked preview of the original captured image.
+
+    The preview shows the original image with the top/bottom mask regions
+    blacked out but preserves full color (no grayscale, no binarization).
+    Set MASKED_PREVIEW_GRAYSCALE = True in settings to save as grayscale instead.
+    """
     if not getattr(preprocessing, 'SAVE_MASKED_PREVIEW', True):
         return None
 
     try:
+        from PIL import Image, ImageDraw
         preview_dir = getattr(preprocessing, 'MASKED_PREVIEW_DIR', 'masked_inspection')
         os.makedirs(preview_dir, exist_ok=True)
 
@@ -200,8 +207,34 @@ def save_masked_preview(preprocessed_image_path, source_image_path):
         ext = source_ext if source_ext else '.png'
         preview_path = os.path.join(preview_dir, f"{source_stem}_masked{ext}")
 
-        shutil.copy2(preprocessed_image_path, preview_path)
+        # Load original image in full color
+        img = Image.open(source_image_path).convert('RGB')
+
+        # Optionally convert to grayscale
+        if getattr(preprocessing, 'MASKED_PREVIEW_GRAYSCALE', False):
+            img = img.convert('L')
+
+        # Apply vertical mask (black bars) only — no binarization, no threshold
+        if getattr(preprocessing, 'APPLY_VERTICAL_MASK', True):
+            width, height = img.size
+            top_ratio = float(getattr(preprocessing, 'MASK_TOP_RATIO', 0.33))
+            bottom_ratio = float(getattr(preprocessing, 'MASK_BOTTOM_RATIO', 0.15))
+            top_pixels = int(height * max(0.0, min(1.0, top_ratio)))
+            bottom_pixels = int(height * max(0.0, min(1.0, bottom_ratio)))
+            draw = ImageDraw.Draw(img)
+            if top_pixels > 0:
+                draw.rectangle([0, 0, width - 1, min(top_pixels - 1, height - 1)], fill=0)
+            if bottom_pixels > 0:
+                start_y = max(0, height - bottom_pixels)
+                draw.rectangle([0, start_y, width - 1, height - 1], fill=0)
+
+        img.save(preview_path)
         return preview_path
+
+    except ImportError:
+        if logging.SHOW_PROGRESS:
+            print(f"     ⚠ Pillow not installed — cannot save masked preview")
+        return None
     except Exception as e:
         if logging.SHOW_PROGRESS:
             print(f"     ⚠ Could not save masked preview: {e}")
@@ -1524,6 +1557,8 @@ EXAMPLES:
         
         use_preprocessing = '--no-preprocess' not in sys.argv
         use_binarization = '--grayscale-only' not in sys.argv
+        if '--preview-grayscale' in sys.argv:
+            preprocessing.MASKED_PREVIEW_GRAYSCALE = True
 
         try:
             mask_top_ratio = _parse_mask_ratio(_parse_cli_float_option(sys.argv, '--mask-top'), '--mask-top')
@@ -1541,7 +1576,7 @@ EXAMPLES:
             mask_top_ratio,
             mask_bottom_ratio,
         )
-    
+
     else:
         # Single image mode
         year_filter = None
@@ -1549,36 +1584,28 @@ EXAMPLES:
             year_idx = sys.argv.index('--year')
             if len(sys.argv) > year_idx + 1:
                 year_filter = sys.argv[year_idx + 1]
-        
+
         # Get image path
         image_path = None
         for arg in sys.argv[1:]:
             if not arg.startswith('--') and arg not in [year_filter]:
                 image_path = arg
                 break
-        
+
+        use_preprocessing = '--no-preprocess' not in sys.argv
+        use_binarization = '--grayscale-only' not in sys.argv
+        if '--preview-grayscale' in sys.argv:
+            preprocessing.MASKED_PREVIEW_GRAYSCALE = True
+
+        try:
+            mask_top_ratio = _parse_mask_ratio(_parse_cli_float_option(sys.argv, '--mask-top'), '--mask-top')
+            mask_bottom_ratio = _parse_mask_ratio(_parse_cli_float_option(sys.argv, '--mask-bottom'), '--mask-bottom')
+        except ValueError as e:
+            print(f"✗ {e}")
+            sys.exit(1)
+
         if image_path:
             print(f"Using custom image: {image_path}")
-            use_preprocessing = '--no-preprocess' not in sys.argv
-            use_binarization = '--grayscale-only' not in sys.argv
-
-            try:
-                mask_top_ratio = _parse_mask_ratio(_parse_cli_float_option(sys.argv, '--mask-top'), '--mask-top')
-                mask_bottom_ratio = _parse_mask_ratio(_parse_cli_float_option(sys.argv, '--mask-bottom'), '--mask-bottom')
-            except ValueError as e:
-                print(f"✗ {e}")
-                sys.exit(1)
-
             main(image_path, year_filter, use_preprocessing, use_binarization, mask_top_ratio, mask_bottom_ratio)
         else:
-            use_preprocessing = '--no-preprocess' not in sys.argv
-            use_binarization = '--grayscale-only' not in sys.argv
-
-            try:
-                mask_top_ratio = _parse_mask_ratio(_parse_cli_float_option(sys.argv, '--mask-top'), '--mask-top')
-                mask_bottom_ratio = _parse_mask_ratio(_parse_cli_float_option(sys.argv, '--mask-bottom'), '--mask-bottom')
-            except ValueError as e:
-                print(f"✗ {e}")
-                sys.exit(1)
-
             main(None, year_filter, use_preprocessing, use_binarization, mask_top_ratio, mask_bottom_ratio)

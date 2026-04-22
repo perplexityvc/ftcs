@@ -57,6 +57,7 @@ class Config:
     ENABLE_POST_PROCESSING = True
     ENABLE_IMAGE_PREPROCESSING = True
     ENABLE_BINARIZATION = True
+    MASKED_PREVIEW_GRAYSCALE = False
     DISABLE_PROCESSING = False
 
     # OCR masking controls (percent)
@@ -100,6 +101,7 @@ class Config:
             'enable_post_processing': cls.ENABLE_POST_PROCESSING,
             'enable_image_preprocessing': cls.ENABLE_IMAGE_PREPROCESSING,
             'enable_binarization': cls.ENABLE_BINARIZATION,
+            'masked_preview_grayscale': cls.MASKED_PREVIEW_GRAYSCALE,
             'disable_processing': cls.DISABLE_PROCESSING,
             'mask_top_percent': cls.MASK_TOP_PERCENT,
             'mask_bottom_percent': cls.MASK_BOTTOM_PERCENT,
@@ -375,6 +377,7 @@ class AutomationEngine:
                 # Compare images
                 is_equal, method, score = self.comparator.compare(last_page_img, new_img)
                 self.stats['comparisons'] += 1
+                self.log(f"SSIM: {score:.4f} ({method}) — {'same' if is_equal else 'changed'}")
 
                 if is_equal and getattr(self.config, 'ENABLE_UNCHANGED_SCREEN_STOP', True):
                     consecutive_identical += 1
@@ -445,11 +448,12 @@ class AutomationEngine:
 
         is_same, method, score = self.comparator.compare(last_section_img, next_img)
         self.stats['comparisons'] += 1
-        
+        self.log(f"SSIM: {score:.4f} ({method}) — {'same' if is_same else 'changed'}")
+
         if is_same:
             self.log("No new section loaded (screen unchanged)")
             return False
-        
+
         self.log("New section detected!")
         return True
 
@@ -661,6 +665,7 @@ class AutomationGUI:
         self.post_processing_enabled_var = tk.BooleanVar(value=Config.ENABLE_POST_PROCESSING)
         self.image_preprocessing_enabled_var = tk.BooleanVar(value=Config.ENABLE_IMAGE_PREPROCESSING)
         self.binarization_enabled_var = tk.BooleanVar(value=Config.ENABLE_BINARIZATION)
+        self.masked_preview_grayscale_var = tk.BooleanVar(value=Config.MASKED_PREVIEW_GRAYSCALE)
         self.disable_processing_var = tk.BooleanVar(value=Config.DISABLE_PROCESSING)
         self.mask_top_percent_var = tk.DoubleVar(value=Config.MASK_TOP_PERCENT)
         self.mask_bottom_percent_var = tk.DoubleVar(value=Config.MASK_BOTTOM_PERCENT)
@@ -707,8 +712,14 @@ class AutomationGUI:
             variable=self.binarization_enabled_var,
         ).grid(row=6, column=0, sticky=tk.W, pady=4)
 
+        ttk.Checkbutton(
+            features_frame,
+            text="Save masked preview as grayscale (default: color)",
+            variable=self.masked_preview_grayscale_var,
+        ).grid(row=7, column=0, sticky=tk.W, pady=4)
+
         mask_frame = ttk.Frame(features_frame)
-        mask_frame.grid(row=7, column=0, sticky=tk.W, pady=6)
+        mask_frame.grid(row=8, column=0, sticky=tk.W, pady=6)
         ttk.Label(mask_frame, text="Mask top %:").grid(row=0, column=0, sticky=tk.W)
         ttk.Spinbox(
             mask_frame,
@@ -734,12 +745,12 @@ class AutomationGUI:
             features_frame,
             text="Disable processing altogether (capture-only mode)",
             variable=self.disable_processing_var,
-        ).grid(row=8, column=0, sticky=tk.W, pady=8)
+        ).grid(row=9, column=0, sticky=tk.W, pady=8)
 
         ttk.Label(
             features_frame,
             text="Capture-only mode disables adaptive waits, stop guards, and OCR post-processing.",
-        ).grid(row=9, column=0, sticky=tk.W, pady=(2, 0))
+        ).grid(row=10, column=0, sticky=tk.W, pady=(2, 0))
         
         # === Control Section ===
         control_frame = ttk.LabelFrame(main_frame, text="Control", padding="10")
@@ -934,6 +945,7 @@ class AutomationGUI:
         Config.ENABLE_POST_PROCESSING = self.post_processing_enabled_var.get()
         Config.ENABLE_IMAGE_PREPROCESSING = self.image_preprocessing_enabled_var.get()
         Config.ENABLE_BINARIZATION = self.binarization_enabled_var.get()
+        Config.MASKED_PREVIEW_GRAYSCALE = self.masked_preview_grayscale_var.get()
         Config.DISABLE_PROCESSING = self.disable_processing_var.get()
         Config.MASK_TOP_PERCENT = float(self.mask_top_percent_var.get())
         Config.MASK_BOTTOM_PERCENT = float(self.mask_bottom_percent_var.get())
@@ -956,6 +968,7 @@ class AutomationGUI:
         self.post_processing_enabled_var.set(Config.ENABLE_POST_PROCESSING)
         self.image_preprocessing_enabled_var.set(Config.ENABLE_IMAGE_PREPROCESSING)
         self.binarization_enabled_var.set(Config.ENABLE_BINARIZATION)
+        self.masked_preview_grayscale_var.set(Config.MASKED_PREVIEW_GRAYSCALE)
         self.disable_processing_var.set(Config.DISABLE_PROCESSING)
         self.mask_top_percent_var.set(Config.MASK_TOP_PERCENT)
         self.mask_bottom_percent_var.set(Config.MASK_BOTTOM_PERCENT)
@@ -995,6 +1008,7 @@ class AutomationGUI:
             Config.ENABLE_POST_PROCESSING = True
             Config.ENABLE_IMAGE_PREPROCESSING = True
             Config.ENABLE_BINARIZATION = True
+            Config.MASKED_PREVIEW_GRAYSCALE = False
             Config.DISABLE_PROCESSING = False
             Config.MASK_TOP_PERCENT = 33.0
             Config.MASK_BOTTOM_PERCENT = 15.0
@@ -1075,6 +1089,9 @@ class AutomationGUI:
             mask_top = max(0.0, min(100.0, float(getattr(Config, 'MASK_TOP_PERCENT', 33.0))))
             mask_bottom = max(0.0, min(100.0, float(getattr(Config, 'MASK_BOTTOM_PERCENT', 15.0))))
             cmd.extend(['--mask-top', f'{mask_top:.2f}', '--mask-bottom', f'{mask_bottom:.2f}'])
+
+        if getattr(Config, 'MASKED_PREVIEW_GRAYSCALE', False):
+            cmd.append('--preview-grayscale')
 
         self.thread_safe_set_status("Running OCR extraction...")
         self.thread_safe_log_message("Starting OCR extraction on captured screenshots...")
