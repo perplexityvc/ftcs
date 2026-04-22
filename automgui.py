@@ -13,6 +13,11 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog, messagebox
 
+try:
+    import pygetwindow as gw
+except Exception:
+    gw = None
+
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
@@ -23,6 +28,7 @@ class Config:
     # Directories
     SAVE_DIR = os.path.join(os.getcwd(), "captured_screens")
     CONFIG_FILE = "automation_config.json"
+    TARGET_WINDOW_TITLE = ""
     
     # Timing
     SCROLL_DELAY = 1.0
@@ -60,6 +66,7 @@ class Config:
         """Save current configuration to JSON file."""
         config_data = {
             'save_dir': cls.SAVE_DIR,
+            'target_window_title': cls.TARGET_WINDOW_TITLE,
             'scroll_delay': cls.SCROLL_DELAY,
             'initial_delay': cls.INITIAL_DELAY,
             'ssim_tolerance': cls.SSIM_TOLERANCE,
@@ -111,8 +118,9 @@ class ImageComparator:
 class ScreenCapture:
     """Handles screenshot capture and saving."""
     
-    def __init__(self, save_dir):
+    def __init__(self, save_dir, target_window_title=""):
         self.save_dir = save_dir
+        self.target_window_title = target_window_title or ""
         self.ensure_directory()
     
     def ensure_directory(self):
@@ -121,10 +129,58 @@ class ScreenCapture:
     
     def capture(self):
         """Take a screenshot and return as OpenCV image."""
-        screenshot = pyautogui.screenshot()
+        region = self.get_capture_region()
+        if region:
+            screenshot = pyautogui.screenshot(region=region)
+        else:
+            screenshot = pyautogui.screenshot()
         frame = np.array(screenshot)
         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
         return frame
+
+    def get_capture_region(self):
+        """Get screenshot region for selected window."""
+        window_title = (self.target_window_title or "").strip()
+        if not window_title:
+            return None
+
+        if gw is None:
+            raise RuntimeError("pygetwindow is required for window-only capture")
+
+        windows = gw.getWindowsWithTitle(window_title)
+        if not windows:
+            raise RuntimeError(f"Target window not found: {window_title}")
+
+        selected = None
+        for win in windows:
+            if getattr(win, 'isMinimized', False):
+                continue
+            width = int(getattr(win, 'width', 0))
+            height = int(getattr(win, 'height', 0))
+            if width > 0 and height > 0:
+                selected = win
+                break
+
+        if selected is None:
+            raise RuntimeError(f"Target window is minimized or invalid: {window_title}")
+
+        left = int(getattr(selected, 'left', 0))
+        top = int(getattr(selected, 'top', 0))
+        width = int(getattr(selected, 'width', 0))
+        height = int(getattr(selected, 'height', 0))
+
+        if width <= 0 or height <= 0:
+            raise RuntimeError(f"Target window has invalid bounds: {window_title}")
+
+        screen_width, screen_height = pyautogui.size()
+        right = min(left + width, screen_width)
+        bottom = min(top + height, screen_height)
+        left = max(left, 0)
+        top = max(top, 0)
+        width = max(1, right - left)
+        height = max(1, bottom - top)
+
+        return (left, top, width, height)
     
     def save(self, image, filename):
         """Save image to disk with verification."""
@@ -170,7 +226,7 @@ class AutomationEngine:
     def __init__(self, config, log_callback=None):
         self.config = config
         self.log_callback = log_callback
-        self.capture = ScreenCapture(config.SAVE_DIR)
+        self.capture = ScreenCapture(config.SAVE_DIR, config.TARGET_WINDOW_TITLE)
         self.comparator = ImageComparator(tolerance=config.SSIM_TOLERANCE)
         
         self.section_count = 0
@@ -200,6 +256,10 @@ class AutomationEngine:
         self.log("SCREEN CAPTURE AUTOMATION STARTED")
         self.log("=" * 60)
         self.log(f"Save directory: {self.config.SAVE_DIR}")
+        if getattr(self.config, 'TARGET_WINDOW_TITLE', '').strip():
+            self.log(f"Target window: {self.config.TARGET_WINDOW_TITLE}")
+        else:
+            self.log("Target window: FULL SCREEN")
         self.log(f"SSIM tolerance: {self.config.SSIM_TOLERANCE}")
         self.log(f"Max pages/section: {self.config.MAX_PAGES_PER_SECTION}")
         self.log(f"Max sections: {self.config.MAX_SECTIONS}")
@@ -456,46 +516,55 @@ class AutomationGUI:
         dir_frame.columnconfigure(0, weight=1)
         ttk.Entry(dir_frame, textvariable=self.save_dir_var).grid(row=0, column=0, sticky=(tk.W, tk.E), padx=(0, 5))
         ttk.Button(dir_frame, text="Browse", command=self.browse_directory, width=10).grid(row=0, column=1)
+
+        # Target Window Title
+        ttk.Label(config_frame, text="Target Window:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.target_window_var = tk.StringVar(value=Config.TARGET_WINDOW_TITLE)
+        target_frame = ttk.Frame(config_frame)
+        target_frame.grid(row=1, column=1, sticky=(tk.W, tk.E), pady=5)
+        target_frame.columnconfigure(0, weight=1)
+        ttk.Entry(target_frame, textvariable=self.target_window_var).grid(row=0, column=0, sticky=(tk.W, tk.E), padx=(0, 5))
+        ttk.Button(target_frame, text="Use Active", command=self.use_active_window, width=10).grid(row=0, column=1)
         
         # Scroll Delay
-        ttk.Label(config_frame, text="Scroll Delay (sec):").grid(row=1, column=0, sticky=tk.W, pady=5)
+        ttk.Label(config_frame, text="Scroll Delay (sec):").grid(row=2, column=0, sticky=tk.W, pady=5)
         self.scroll_delay_var = tk.DoubleVar(value=Config.SCROLL_DELAY)
         ttk.Spinbox(config_frame, from_=0.1, to=5.0, increment=0.1, 
-                   textvariable=self.scroll_delay_var, width=15).grid(row=1, column=1, sticky=tk.W, pady=5)
+                   textvariable=self.scroll_delay_var, width=15).grid(row=2, column=1, sticky=tk.W, pady=5)
         
         # Initial Delay
-        ttk.Label(config_frame, text="Initial Delay (sec):").grid(row=2, column=0, sticky=tk.W, pady=5)
+        ttk.Label(config_frame, text="Initial Delay (sec):").grid(row=3, column=0, sticky=tk.W, pady=5)
         self.initial_delay_var = tk.DoubleVar(value=Config.INITIAL_DELAY)
         ttk.Spinbox(config_frame, from_=1, to=30, increment=1, 
-                   textvariable=self.initial_delay_var, width=15).grid(row=2, column=1, sticky=tk.W, pady=5)
+                   textvariable=self.initial_delay_var, width=15).grid(row=3, column=1, sticky=tk.W, pady=5)
         
         # SSIM Tolerance
-        ttk.Label(config_frame, text="SSIM Tolerance:").grid(row=3, column=0, sticky=tk.W, pady=5)
+        ttk.Label(config_frame, text="SSIM Tolerance:").grid(row=4, column=0, sticky=tk.W, pady=5)
         self.ssim_tolerance_var = tk.DoubleVar(value=Config.SSIM_TOLERANCE)
         ttk.Spinbox(config_frame, from_=0.80, to=0.999, increment=0.01, 
-                   textvariable=self.ssim_tolerance_var, width=15, format="%.3f").grid(row=3, column=1, sticky=tk.W, pady=5)
+                   textvariable=self.ssim_tolerance_var, width=15, format="%.3f").grid(row=4, column=1, sticky=tk.W, pady=5)
         
         # Max Pages Per Section
-        ttk.Label(config_frame, text="Max Pages/Section:").grid(row=4, column=0, sticky=tk.W, pady=5)
+        ttk.Label(config_frame, text="Max Pages/Section:").grid(row=5, column=0, sticky=tk.W, pady=5)
         self.max_pages_var = tk.IntVar(value=Config.MAX_PAGES_PER_SECTION)
         ttk.Spinbox(config_frame, from_=10, to=500, increment=10, 
-                   textvariable=self.max_pages_var, width=15).grid(row=4, column=1, sticky=tk.W, pady=5)
+                   textvariable=self.max_pages_var, width=15).grid(row=5, column=1, sticky=tk.W, pady=5)
         
         # Max Sections
-        ttk.Label(config_frame, text="Max Sections:").grid(row=5, column=0, sticky=tk.W, pady=5)
+        ttk.Label(config_frame, text="Max Sections:").grid(row=6, column=0, sticky=tk.W, pady=5)
         self.max_sections_var = tk.IntVar(value=Config.MAX_SECTIONS)
         ttk.Spinbox(config_frame, from_=1, to=200, increment=1, 
-                   textvariable=self.max_sections_var, width=15).grid(row=5, column=1, sticky=tk.W, pady=5)
+                   textvariable=self.max_sections_var, width=15).grid(row=6, column=1, sticky=tk.W, pady=5)
         
         # Max Consecutive Identical
-        ttk.Label(config_frame, text="Max Consecutive Identical:").grid(row=6, column=0, sticky=tk.W, pady=5)
+        ttk.Label(config_frame, text="Max Consecutive Identical:").grid(row=7, column=0, sticky=tk.W, pady=5)
         self.max_consecutive_var = tk.IntVar(value=Config.MAX_CONSECUTIVE_IDENTICAL)
         ttk.Spinbox(config_frame, from_=1, to=10, increment=1, 
-                   textvariable=self.max_consecutive_var, width=15).grid(row=6, column=1, sticky=tk.W, pady=5)
+                   textvariable=self.max_consecutive_var, width=15).grid(row=7, column=1, sticky=tk.W, pady=5)
         
         # Config buttons
         config_btn_frame = ttk.Frame(config_frame)
-        config_btn_frame.grid(row=7, column=0, columnspan=2, pady=10)
+        config_btn_frame.grid(row=8, column=0, columnspan=2, pady=10)
         ttk.Button(config_btn_frame, text="Save Config", 
                   command=self.save_config).pack(side=tk.LEFT, padx=5)
         ttk.Button(config_btn_frame, text="Load Config", 
@@ -545,6 +614,26 @@ class AutomationGUI:
         directory = filedialog.askdirectory(initialdir=self.save_dir_var.get())
         if directory:
             self.save_dir_var.set(directory)
+
+    def use_active_window(self):
+        """Set target window title from currently active window."""
+        if gw is None:
+            messagebox.showerror("Error", "pygetwindow is required to select active window")
+            return
+
+        try:
+            active = gw.getActiveWindow()
+            title = active.title.strip() if active and active.title else ""
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not read active window: {e}")
+            return
+
+        if not title:
+            messagebox.showwarning("Warning", "No active window title detected")
+            return
+
+        self.target_window_var.set(title)
+        self.log_message(f"Target window set to: {title}")
     
     def log_message(self, message):
         """Add message to log text widget."""
@@ -567,6 +656,7 @@ class AutomationGUI:
     def update_config_from_ui(self):
         """Update Config class from UI values."""
         Config.SAVE_DIR = self.save_dir_var.get()
+        Config.TARGET_WINDOW_TITLE = self.target_window_var.get().strip()
         Config.SCROLL_DELAY = self.scroll_delay_var.get()
         Config.INITIAL_DELAY = self.initial_delay_var.get()
         Config.SSIM_TOLERANCE = self.ssim_tolerance_var.get()
@@ -577,6 +667,7 @@ class AutomationGUI:
     def load_config_to_ui(self):
         """Load Config values to UI."""
         self.save_dir_var.set(Config.SAVE_DIR)
+        self.target_window_var.set(Config.TARGET_WINDOW_TITLE)
         self.scroll_delay_var.set(Config.SCROLL_DELAY)
         self.initial_delay_var.set(Config.INITIAL_DELAY)
         self.ssim_tolerance_var.set(Config.SSIM_TOLERANCE)
@@ -602,6 +693,7 @@ class AutomationGUI:
         """Reset configuration to defaults."""
         if messagebox.askyesno("Confirm Reset", "Reset all settings to defaults?"):
             Config.SAVE_DIR = os.path.join(os.getcwd(), "captured_screens")
+            Config.TARGET_WINDOW_TITLE = ""
             Config.SCROLL_DELAY = 1.0
             Config.INITIAL_DELAY = 5.0
             Config.SSIM_TOLERANCE = 0.97
@@ -625,6 +717,10 @@ class AutomationGUI:
         # Validate save directory
         if not self.save_dir_var.get():
             messagebox.showerror("Error", "Please specify a save directory!")
+            return
+
+        if not self.target_window_var.get().strip():
+            messagebox.showerror("Error", "Please set a target window title (window-only capture is required)")
             return
         
         # Create engine with log callback
