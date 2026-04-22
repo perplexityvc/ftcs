@@ -29,6 +29,7 @@ class Config:
     SAVE_DIR = os.path.join(os.getcwd(), "captured_screens")
     CONFIG_FILE = "automation_config.json"
     TARGET_WINDOW_TITLE = ""
+    TARGET_WINDOW_HANDLE = 0
     
     # Timing
     SCROLL_DELAY = 1.0
@@ -76,6 +77,7 @@ class Config:
         config_data = {
             'save_dir': cls.SAVE_DIR,
             'target_window_title': cls.TARGET_WINDOW_TITLE,
+            'target_window_handle': cls.TARGET_WINDOW_HANDLE,
             'scroll_delay': cls.SCROLL_DELAY,
             'initial_delay': cls.INITIAL_DELAY,
             'ssim_tolerance': cls.SSIM_TOLERANCE,
@@ -134,9 +136,10 @@ class ImageComparator:
 class ScreenCapture:
     """Handles screenshot capture and saving."""
     
-    def __init__(self, save_dir, target_window_title=""):
+    def __init__(self, save_dir, target_window_title="", target_window_handle=0):
         self.save_dir = save_dir
         self.target_window_title = target_window_title or ""
+        self.target_window_handle = int(target_window_handle or 0)
         self.ensure_directory()
     
     def ensure_directory(self):
@@ -156,29 +159,34 @@ class ScreenCapture:
 
     def get_capture_region(self):
         """Get screenshot region for selected window."""
-        window_title = (self.target_window_title or "").strip()
-        if not window_title:
-            return None
-
         if gw is None:
             raise RuntimeError("pygetwindow is required for window-only capture")
 
-        windows = gw.getWindowsWithTitle(window_title)
-        if not windows:
-            raise RuntimeError(f"Target window not found: {window_title}")
-
         selected = None
-        for win in windows:
-            if getattr(win, 'isMinimized', False):
-                continue
-            width = int(getattr(win, 'width', 0))
-            height = int(getattr(win, 'height', 0))
-            if width > 0 and height > 0:
-                selected = win
-                break
+        if self.target_window_handle > 0:
+            selected = self.find_window_by_handle(self.target_window_handle)
+            if selected is None:
+                raise RuntimeError(f"Target window handle not found: {self.target_window_handle}")
+        else:
+            window_title = (self.target_window_title or "").strip()
+            if not window_title:
+                return None
 
-        if selected is None:
-            raise RuntimeError(f"Target window is minimized or invalid: {window_title}")
+            windows = gw.getWindowsWithTitle(window_title)
+            if not windows:
+                raise RuntimeError(f"Target window not found: {window_title}")
+
+            for win in windows:
+                if getattr(win, 'isMinimized', False):
+                    continue
+                width = int(getattr(win, 'width', 0))
+                height = int(getattr(win, 'height', 0))
+                if width > 0 and height > 0:
+                    selected = win
+                    break
+
+            if selected is None:
+                raise RuntimeError(f"Target window is minimized or invalid: {window_title}")
 
         left = int(getattr(selected, 'left', 0))
         top = int(getattr(selected, 'top', 0))
@@ -197,6 +205,14 @@ class ScreenCapture:
         height = max(1, bottom - top)
 
         return (left, top, width, height)
+
+    def find_window_by_handle(self, handle):
+        """Find a window object by OS handle."""
+        for win in gw.getAllWindows():
+            win_handle = int(getattr(win, '_hWnd', getattr(win, 'hWnd', 0)) or 0)
+            if win_handle == int(handle):
+                return win
+        return None
     
     def save(self, image, filename):
         """Save image to disk with verification."""
@@ -242,7 +258,11 @@ class AutomationEngine:
     def __init__(self, config, log_callback=None):
         self.config = config
         self.log_callback = log_callback
-        self.capture = ScreenCapture(config.SAVE_DIR, config.TARGET_WINDOW_TITLE)
+        self.capture = ScreenCapture(
+            config.SAVE_DIR,
+            config.TARGET_WINDOW_TITLE,
+            getattr(config, 'TARGET_WINDOW_HANDLE', 0),
+        )
         self.comparator = ImageComparator(tolerance=config.SSIM_TOLERANCE)
         
         self.section_count = 0
@@ -272,7 +292,12 @@ class AutomationEngine:
         self.log("SCREEN CAPTURE AUTOMATION STARTED")
         self.log("=" * 60)
         self.log(f"Save directory: {self.config.SAVE_DIR}")
-        if getattr(self.config, 'TARGET_WINDOW_TITLE', '').strip():
+        if int(getattr(self.config, 'TARGET_WINDOW_HANDLE', 0) or 0) > 0:
+            self.log(
+                f"Target window: {self.config.TARGET_WINDOW_TITLE} "
+                f"(handle={self.config.TARGET_WINDOW_HANDLE})"
+            )
+        elif getattr(self.config, 'TARGET_WINDOW_TITLE', '').strip():
             self.log(f"Target window: {self.config.TARGET_WINDOW_TITLE}")
         else:
             self.log("Target window: FULL SCREEN")
@@ -566,11 +591,13 @@ class AutomationGUI:
         # Target Window Title
         ttk.Label(config_frame, text="Target Window:").grid(row=1, column=0, sticky=tk.W, pady=5)
         self.target_window_var = tk.StringVar(value=Config.TARGET_WINDOW_TITLE)
+        self.target_window_handle_var = tk.StringVar(value=str(getattr(Config, 'TARGET_WINDOW_HANDLE', 0) or 0))
         target_frame = ttk.Frame(config_frame)
         target_frame.grid(row=1, column=1, sticky=(tk.W, tk.E), pady=5)
         target_frame.columnconfigure(0, weight=1)
         ttk.Entry(target_frame, textvariable=self.target_window_var).grid(row=0, column=0, sticky=(tk.W, tk.E), padx=(0, 5))
         ttk.Button(target_frame, text="Select...", command=self.use_active_window, width=10).grid(row=0, column=1)
+        ttk.Label(target_frame, textvariable=self.target_window_handle_var).grid(row=1, column=0, sticky=tk.W, pady=(4, 0))
         
         # Scroll Delay
         ttk.Label(config_frame, text="Scroll Delay (sec):").grid(row=2, column=0, sticky=tk.W, pady=5)
@@ -725,40 +752,57 @@ class AutomationGUI:
 
         try:
             active = gw.getActiveWindow()
-            active_title = active.title.strip() if active and active.title else ""
-            titles = self.get_selectable_window_titles()
+            active_handle = int(getattr(active, '_hWnd', getattr(active, 'hWnd', 0)) or 0) if active else 0
+            windows = self.get_selectable_windows()
         except Exception as e:
             messagebox.showerror("Error", f"Could not read available windows: {e}")
             return
 
-        if not titles:
+        if not windows:
             messagebox.showwarning("Warning", "No selectable application windows found")
             return
 
-        title = self.show_window_picker(titles, active_title)
-        if not title:
+        selected_window = self.show_window_picker(windows, active_handle)
+        if not selected_window:
             return
 
-        self.target_window_var.set(title)
-        self.log_message(f"Target window set to: {title}")
+        self.target_window_var.set(selected_window['title'])
+        self.target_window_handle_var.set(str(selected_window['handle']))
+        self.log_message(
+            f"Target window set to: {selected_window['title']} "
+            f"(handle={selected_window['handle']})"
+        )
 
-    def get_selectable_window_titles(self):
-        """Return unique non-empty window titles for explicit selection."""
-        titles = []
-        for title in gw.getAllTitles():
-            cleaned = title.strip()
-            if cleaned:
-                titles.append(cleaned)
+    def get_selectable_windows(self):
+        """Return selectable windows as dicts with title and handle."""
+        windows = []
+        for win in gw.getAllWindows():
+            title = (getattr(win, 'title', '') or '').strip()
+            handle = int(getattr(win, '_hWnd', getattr(win, 'hWnd', 0)) or 0)
+            width = int(getattr(win, 'width', 0) or 0)
+            height = int(getattr(win, 'height', 0) or 0)
 
-        unique_titles = []
-        for title in titles:
-            if title not in unique_titles:
-                unique_titles.append(title)
+            if not title or handle <= 0 or width <= 0 or height <= 0:
+                continue
 
-        return unique_titles
+            windows.append({
+                'title': title,
+                'handle': handle,
+                'display': f"[{handle}] {title}",
+            })
 
-    def show_window_picker(self, titles, active_title=""):
-        """Show a modal picker and return selected title or None."""
+        unique = []
+        seen_handles = set()
+        for item in windows:
+            if item['handle'] in seen_handles:
+                continue
+            seen_handles.add(item['handle'])
+            unique.append(item)
+
+        return unique
+
+    def show_window_picker(self, windows, active_handle=0):
+        """Show a modal picker and return selected window dict or None."""
         dialog = tk.Toplevel(self.root)
         dialog.title("Select Target Window")
         dialog.transient(self.root)
@@ -770,14 +814,21 @@ class AutomationGUI:
         listbox = tk.Listbox(dialog, exportselection=False)
         listbox.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
-        for title in titles:
-            listbox.insert(tk.END, title)
+        displays = [item['display'] for item in windows]
+        for label in displays:
+            listbox.insert(tk.END, label)
 
-        if active_title and active_title in titles:
-            idx = titles.index(active_title)
-            listbox.selection_set(idx)
-            listbox.see(idx)
-        elif titles:
+        active_idx = -1
+        if int(active_handle or 0) > 0:
+            for idx, item in enumerate(windows):
+                if item['handle'] == int(active_handle):
+                    active_idx = idx
+                    break
+
+        if active_idx >= 0:
+            listbox.selection_set(active_idx)
+            listbox.see(active_idx)
+        elif windows:
             listbox.selection_set(0)
 
         selected = {'value': None}
@@ -787,7 +838,7 @@ class AutomationGUI:
             if not selection:
                 messagebox.showwarning("Warning", "Please select a window title", parent=dialog)
                 return
-            selected['value'] = titles[selection[0]]
+            selected['value'] = windows[selection[0]]
             dialog.destroy()
 
         def cancel_selection():
@@ -826,6 +877,10 @@ class AutomationGUI:
         """Update Config class from UI values."""
         Config.SAVE_DIR = self.save_dir_var.get()
         Config.TARGET_WINDOW_TITLE = self.target_window_var.get().strip()
+        try:
+            Config.TARGET_WINDOW_HANDLE = int(self.target_window_handle_var.get().strip() or 0)
+        except ValueError:
+            Config.TARGET_WINDOW_HANDLE = 0
         Config.SCROLL_DELAY = self.scroll_delay_var.get()
         Config.INITIAL_DELAY = self.initial_delay_var.get()
         Config.SSIM_TOLERANCE = self.ssim_tolerance_var.get()
@@ -844,6 +899,7 @@ class AutomationGUI:
         """Load Config values to UI."""
         self.save_dir_var.set(Config.SAVE_DIR)
         self.target_window_var.set(Config.TARGET_WINDOW_TITLE)
+        self.target_window_handle_var.set(str(getattr(Config, 'TARGET_WINDOW_HANDLE', 0) or 0))
         self.scroll_delay_var.set(Config.SCROLL_DELAY)
         self.initial_delay_var.set(Config.INITIAL_DELAY)
         self.ssim_tolerance_var.set(Config.SSIM_TOLERANCE)
@@ -877,6 +933,7 @@ class AutomationGUI:
         if messagebox.askyesno("Confirm Reset", "Reset all settings to defaults?"):
             Config.SAVE_DIR = os.path.join(os.getcwd(), "captured_screens")
             Config.TARGET_WINDOW_TITLE = ""
+            Config.TARGET_WINDOW_HANDLE = 0
             Config.SCROLL_DELAY = 1.0
             Config.INITIAL_DELAY = 5.0
             Config.SSIM_TOLERANCE = 0.97
@@ -909,8 +966,8 @@ class AutomationGUI:
             messagebox.showerror("Error", "Please specify a save directory!")
             return
 
-        if self.require_window_var.get() and not self.target_window_var.get().strip():
-            messagebox.showerror("Error", "Please set a target window title (window-only capture is required)")
+        if self.require_window_var.get() and int(self.target_window_handle_var.get().strip() or 0) <= 0:
+            messagebox.showerror("Error", "Please select a target window handle (window-only capture is required)")
             return
         
         # Create engine with log callback
