@@ -4,14 +4,14 @@ OCR-powered table extraction utility for accounting-style terminal screenshots. 
 
 ## Features
 
-- **Template-based extraction** — Regex-driven row parsing optimized for accounting table formats
-- **Adaptive OCR** — Automatic confidence threshold lowering for low-quality scans
-- **Image preprocessing** — Binarization, contrast enhancement, sharpening, and vertical masking
-- **OCR bounding box preview** — Color-coded confidence visualization on masked images
+- **Direct pytesseract integration** — Uses Python binding for Tesseract instead of subprocess calls
+- **Smart amount normalization** — Handles terminal-font OCR confusion (I→1, O→0, T→7, etc.)
+- **C/R table code normalization** — Fixes common OCR errors in 4-character table codes
 - **Year filtering** — Extract only rows matching a specific year (`--year YYYY`)
-- **Batch processing** — Process entire folders of PNG images into a single combined CSV
-- **OCR error correction** — Fixes common misreads (e.g., `BB74` → `B674`, `90xxx` → `00xxx`)
-- **Excel generation** — Outputs a ready-to-run script for creating formatted `.xlsx` files
+- **Batch processing** — Process entire folders of images into a single combined CSV
+- **Direct Excel export** — Native `.xlsx` output without intermediate scripts
+- **Debug summary** — Per-file extraction statistics in a terminal-friendly table
+- **Multi-format support** — PNG, JPG, JPEG, BMP, TIFF, WEBP
 - **Fully configurable** — All OCR, preprocessing, cleaning, and path settings in `settings.py`
 
 ## Project Structure
@@ -56,10 +56,11 @@ tesseract --version
 **Dependencies:**
 | Package | Purpose |
 |---------|---------|
+| `pytesseract` | Python binding for Tesseract OCR |
+| `opencv-python` | Image loading and processing |
 | `Pillow` | Image preprocessing (binarization, masking, sharpening) |
 | `openpyxl` | Excel `.xlsx` file generation |
 | `numpy` | Array operations for image processing |
-| `opencv-python` | Advanced image processing |
 | `scikit-image` | Structural similarity (SSIM) comparison |
 | `pyautogui` | GUI automation for screen capture |
 | `PyGetWindow` | Window management for automation |
@@ -69,65 +70,73 @@ tesseract --version
 ### Single Image
 
 ```bash
-# Basic extraction
+# Basic extraction (outputs to terminal_ocr_output_all_years.csv)
 python extract.py image.png
 
 # With year filter
-python extract.py image.png --year 2020
+python extract.py image.png --year 2025
 
-# Use default image from settings.py
-python extract.py
+# With Excel export
+python extract.py image.png --xlsx output.xlsx
+
+# Custom CSV output path
+python extract.py image.png --csv my_output.csv
 ```
 
 ### Batch Processing
 
 ```bash
-# Process folder with explicit output
-python extract.py --batch ./images combined_output.csv
+# Process folder
+python extract.py --batch --folder ./images
+
+# Process with year filter
+python extract.py --batch --folder ./images --year 2025
+
+# Process with explicit output
+python extract.py --batch --folder ./images combined_output.csv --xlsx output.xlsx
 
 # Use defaults from settings.py
 python extract.py --batch
 
-# Batch with year filter
-python extract.py --batch --year 2020
-
-# Batch with custom output, default input folder
-python extract.py --batch my_output.csv --year 2020
+# Recursive folder scan
+python extract.py --batch --folder ./images --recursive
 ```
 
 ### CLI Options
 
 | Option | Description |
 |--------|-------------|
-| `--year YYYY` | Filter results to only include the specified year |
-| `--batch` | Process all PNG images in a folder |
-| `--no-preprocess` | Disable image preprocessing/masking before OCR |
-| `--grayscale-only` | Disable binarization, keep grayscale image |
-| `--mask-top PERCENT` | Mask top percentage (0–100, default: 33%) |
-| `--mask-bottom PERCENT` | Mask bottom percentage (0–100, default: 15%) |
-| `--preview-grayscale` | Save masked preview in grayscale |
-| `--no-preview-bboxes` | Disable OCR bounding box overlay on preview |
-| `--help`, `-h` | Show help message |
+| `images` | Positional screenshot image paths |
+| `--batch` | Batch process all images in folder |
+| `--folder PATH` | Folder containing screenshot images |
+| `--recursive` | Scan subfolders recursively (with `--batch`) |
+| `--year YYYY` | Filter results to specified year. Use `ALL` for all years |
+| `--csv PATH` | CSV output path |
+| `--xlsx PATH` | Excel `.xlsx` output path |
+| `--no-prompt` | Do not ask for year; export all years unless `--year` is supplied |
+| `--no-debug` | Turn off per-file terminal debug summary |
+| `--debug` | Force per-file terminal debug summary on |
 
 ## Output Files
 
 | File | Description |
 |------|-------------|
-| `extracted_table.csv` | Primary CSV output (single image mode) |
-| `combined_output.csv` | Combined CSV output (batch mode) |
-| `create_excel.py` | Generated script to create `extracted_table.xlsx` |
-| `preprocessed.png` | Temporary preprocessed image (cleaned up after run) |
-| `masked_inspection/` | Directory containing masked preview images with OCR bbox overlays |
+| `terminal_ocr_output_{year}.csv` | CSV output (single or batch mode) |
+| `terminal_ocr_output_all_years.csv` | CSV output when no year filter |
+| `{name}.xlsx` | Excel output (when `--xlsx` is specified) |
 
 ### Output Columns
 
 | Column | Description |
 |--------|-------------|
-| `C/R Table` | Cash receipts table identifier |
-| `Date` | Transaction date (DD/MM/YYYY) |
-| `Doc No.` | Document number (e.g., `B674`) |
-| `Orig Amount` | Original transaction amount |
-| `Acc Amount` | Accounted amount |
+| `source_image` | Source image filename |
+| `cr_table` | Cash receipts table identifier |
+| `row_no` | Row number within the image |
+| `transaction_date` | Transaction date (DD/MM/YYYY) |
+| `pfx_document_number` | Document number (e.g., `B674`) |
+| `original_amount` | Original transaction amount |
+| `accounting_amount` | Accounted amount |
+| `raw_ocr_line` | Raw OCR text line for verification |
 
 ## Configuration
 
@@ -136,6 +145,7 @@ All settings are centralized in `settings.py`. Key configuration classes:
 ### `OCRSettings`
 - `CONFIDENCE_THRESHOLD` — Minimum OCR confidence (0–100, default: 15)
 - `PSM_MODE` — Tesseract page segmentation mode (default: `6`)
+- `OCR_ENGINE_MODE` — Tesseract engine mode (default: 3 = auto)
 - `TESSERACT_PATH` — Explicit Tesseract executable path
 
 ### `PreprocessingSettings`
@@ -148,48 +158,61 @@ All settings are centralized in `settings.py`. Key configuration classes:
 - `SAVE_MASKED_PREVIEW` — Save preview images for inspection (default: `True`)
 - `MASKED_PREVIEW_SHOW_BBOXES` — Draw OCR confidence boxes on preview (default: `True`)
 
-### `TableStructureSettings`
-- `STANDARD_HEADERS` — Output column names
-- `TABLE_NUMBER_PATTERNS` — Regex patterns for C/R Table number extraction
+### `ErrorCorrectionSettings`
+- `AMOUNT_CHAR_TRANSLATION` — Character mapping for amount normalization (I→1, O→0, T→7, etc.)
 
-### `CleaningSettings`
-- `MIN_DATE_LENGTH` — Minimum characters for valid date (default: 8)
-- `MIN_DOC_NUMBER_LENGTH` — Minimum characters for doc number (default: 2)
-- `STANDARD_DOC_NUMBER` — Fallback document number (default: `B674`)
+### `OutputSettings`
+- `OUTPUT_COLUMNS` — Column names for CSV/Excel export
 
 ### `PathSettings`
 - `DEFAULT_INPUT_IMAGE` — Default image for single mode
 - `DEFAULT_INPUT_FOLDER` — Default folder for batch mode
-- `DEFAULT_OUTPUT_CSV` — Default CSV filename
-- `DEFAULT_BATCH_OUTPUT` — Default batch output filename
+- `SUPPORTED_IMAGE_FORMATS` — List of supported image glob patterns
 
 Run `python settings.py` to view all current settings.
+
+## Amount Normalization
+
+The OCR routine includes sophisticated amount normalization for terminal-font screenshots:
+
+| OCR Reading | Normalized | Explanation |
+|-------------|------------|-------------|
+| `5. 3f=` | `5.37-` | Space removed, f→7, =→- |
+| `5.1 +` | `5.1+` | Preserved as-is |
+| `1.if=` | `1.17-` | i→1, f→7, =→- |
+| `5.t5-` | `5.75-` | t→7 |
+| `23.T1-` | `23.71-` | T→7 |
 
 ## Troubleshooting
 
 ### `tesseract: command not found`
 Install Tesseract OCR and ensure it's in your system `PATH`, or set `OCRSettings.TESSERACT_PATH` in `settings.py`.
 
+### `pytesseract` not found
+```bash
+pip install pytesseract
+```
+
 ### Low extraction quality
 - Adjust `CONFIDENCE_THRESHOLD` (lower to capture more text, higher to reduce noise)
-- Tune `PIL_THRESHOLD` for binarization
-- Enable/disable `APPLY_SHARPENING` and `CONTRAST_ENHANCEMENT`
 - Check `masked_inspection/` preview images to verify preprocessing
+- Review `raw_ocr_line` column in output to see original OCR text
 
 ### No rows in output
 - Verify input image contains a recognizable table format
 - Try without `--year` filter
-- Check that dates contain `/` and are at least 8 characters
-- Review `MIN_DATE_LENGTH` and `MIN_DOC_NUMBER_LENGTH` in settings
+- Check that dates contain `/` in DD/MM/YYYY format
 
 ### UnicodeEncodeError on Windows
 The script includes a safe print wrapper for ASCII fallback. If issues persist, set `PYTHONIOENCODING=utf-8` before running.
 
 ## Architecture Notes
 
-- **Template extraction is always used** (`should_use_template_extraction()` returns `True`) — this is intentional for this specific table format, as regex-based row parsing is more reliable than column detection for closely-spaced rows
-- The pipeline falls back to column-based extraction when template extraction yields no results
-- Adaptive OCR retry lowers the confidence threshold by 10 (min 5) when fewer than 20 words are detected
+- Uses `pytesseract` Python binding for direct Tesseract integration
+- Image loading via `cv2.imread()` for better format support
+- Regex-based row extraction with DATE_RE, DOC_RE, CR_RE patterns
+- Amount normalization with character translation table for terminal-font OCR confusion
+- Debug summary table for per-file extraction statistics
 
 ## License
 

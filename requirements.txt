@@ -1,6 +1,7 @@
 numpy
 opencv-python
 Pillow
+pytesseract
 pyautogui
 PyGetWindow
 scikit-image

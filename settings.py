@@ -22,6 +22,13 @@ class OCRSettings:
     # 6 = Assume a single uniform block of text
     PSM_MODE = '6'
     
+    # OCR engine mode
+    # 3 = Default (based on what is available)
+    # 0 = Legacy engine only
+    # 1 = Neural nets LSTM engine only
+    # 2 = Legacy + LSTM engines
+    OCR_ENGINE_MODE = 3
+    
     # OCR output format
     OUTPUT_FORMAT = 'tsv'  # Tab-separated values with positioning data
 
@@ -221,7 +228,7 @@ class PathSettings:
     DEFAULT_BATCH_OUTPUT = 'combined_output.csv'
     
     # Supported image formats for batch processing
-    SUPPORTED_IMAGE_FORMATS = ['*.png', '*.PNG']
+    SUPPORTED_IMAGE_FORMATS = ['*.png', '*.PNG', '*.jpg', '*.jpeg', '*.bmp', '*.tif', '*.tiff', '*.webp']
 
 
 # ============================================================================
@@ -273,6 +280,16 @@ class ErrorCorrectionSettings:
         'D0': '00',  # D0 → 00
         ' .': '.',   # Space before decimal
     }
+    
+    # Character translation table for amount normalization
+    # Tesseract confuses these terminal-font glyphs in numeric columns
+    AMOUNT_CHAR_TRANSLATION = {
+        ',': '.', '=': '-', '—': '-', '–': '-',
+        'I': '1', 'l': '1', 'i': '1', '|': '1',
+        'O': '0', 'o': '0',
+        # In this terminal font, T/t are common OCR substitutes for the digit 7
+        'T': '7', 't': '7',
+    }
 
 
 # ============================================================================
@@ -303,6 +320,18 @@ class OutputSettings:
     
     # Number of preview rows to show
     PREVIEW_ROWS = 10
+    
+    # Output column names for CSV/Excel export
+    OUTPUT_COLUMNS = [
+        'source_image',
+        'cr_table',
+        'row_no',
+        'transaction_date',
+        'pfx_document_number',
+        'original_amount',
+        'accounting_amount',
+        'raw_ocr_line',
+    ]
 
 
 # ============================================================================
