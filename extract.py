@@ -1,51 +1,76 @@
 #!/usr/bin/env python3
 """
-Optimized OCR Table Extraction to Excel
-Version 4.3 - Now with centralized settings
-Extracts accounting tables and creates formatted Excel output
+OCR Table Extraction to Excel
+Version 5.0 - Updated OCR engine with pytesseract
+Extracts accounting tables from terminal screenshots and exports to CSV/Excel
 """
-import subprocess
-import re
 import csv
+import re
+import sys
+import os
+from pathlib import Path
+from typing import Iterable, Optional
+
+import builtins
+
+
+def print(*args, **kwargs):
+    """Print wrapper that falls back to ASCII-safe output on encoding errors."""
+    try:
+        builtins.print(*args, **kwargs)
+    except UnicodeEncodeError:
+        safe_args = [str(arg).encode('ascii', 'replace').decode('ascii') for arg in args]
+        builtins.print(*safe_args, **kwargs)
+
 
 # Import settings
 try:
     from settings import (
-        ocr, preprocessing, table_detection, cleaning, 
+        ocr, preprocessing, table_detection, cleaning,
         table_structure, paths, year_filter, error_correction,
         output, logging, batch, validation
     )
     SETTINGS_LOADED = True
 except ImportError:
-    # If settings.py not found, use inline defaults
-    print("⚠ Warning: settings.py not found, using default settings")
+    print("Warning: settings.py not found, using default settings")
     SETTINGS_LOADED = False
-    
-    # Create simple namespace for defaults
-    class Settings: pass
-    
+
+    class Settings:
+        pass
+
     ocr = Settings()
     ocr.CONFIDENCE_THRESHOLD = 15
     ocr.PSM_MODE = '6'
-    
+    ocr.OCR_ENGINE_MODE = 3
+    ocr.OUTPUT_FORMAT = 'tsv'
+    ocr.TESSERACT_PATH = ''
+
     preprocessing = Settings()
     preprocessing.PIL_THRESHOLD = 122
     preprocessing.CONTRAST_ENHANCEMENT = 1.2
     preprocessing.APPLY_SHARPENING = True
-    
+    preprocessing.APPLY_BINARIZATION = True
+    preprocessing.APPLY_VERTICAL_MASK = True
+    preprocessing.MASK_TOP_RATIO = 0.33
+    preprocessing.MASK_BOTTOM_RATIO = 0.15
+    preprocessing.SAVE_MASKED_PREVIEW = True
+    preprocessing.MASKED_PREVIEW_DIR = 'masked_inspection'
+    preprocessing.MASKED_PREVIEW_GRAYSCALE = False
+    preprocessing.MASKED_PREVIEW_SHOW_BBOXES = True
+
     table_detection = Settings()
-    table_detection.ROW_GROUPING_TOLERANCE = 20
+    table_detection.ROW_GROUPING_TOLERANCE = 15
     table_detection.COLUMN_GROUPING_TOLERANCE = 45
     table_detection.EMPTY_COLUMN_THRESHOLD = 0.20
-    
+
     cleaning = Settings()
     cleaning.STANDARD_DOC_NUMBER = 'B674'
     cleaning.MIN_DATE_LENGTH = 8
     cleaning.MIN_DOC_NUMBER_LENGTH = 2
     cleaning.DATE_REQUIRED_CHAR = '/'
-    
+
     table_structure = Settings()
-    table_structure.STANDARD_HEADERS = ['C/R Table', 'Date', 'Trans No', 'G/L', 'Doc No.', 'Orig Amount', 'Acc Amount']
+    table_structure.STANDARD_HEADERS = ['C/R Table', 'Date', 'Doc No.', 'Orig Amount', 'Acc Amount']
     table_structure.HEADER_KEYWORDS = ['date', 'trans', 'number', 'amount', 'document', 'sel']
     table_structure.TABLE_NUMBER_PATTERNS = [
         r'C/R\s+Table\s+([A-Z0-9]+)',
@@ -54,1320 +79,640 @@ except ImportError:
     ]
     table_structure.MAX_TABLE_NUMBER_LENGTH = 10
     table_structure.MIN_TABLE_NUMBER_LENGTH = 2
-    
+
     paths = Settings()
     paths.DEFAULT_INPUT_IMAGE = 'frame_0015.png'
-    paths.DEFAULT_INPUT_FOLDER = 'frames_masked/frames_masked'
+    paths.DEFAULT_INPUT_FOLDER = 'frames_masked'
     paths.TEMP_PREPROCESSED_IMAGE = 'preprocessed.png'
     paths.DEFAULT_OUTPUT_CSV = 'extracted_table.csv'
+    paths.DEFAULT_BATCH_OUTPUT = 'combined_output.csv'
     paths.EXCEL_GENERATOR_SCRIPT = 'create_excel.py'
-    paths.TEMP_PREPROCESSED_IMAGE = 'preprocessed.png'
-    paths.DEFAULT_OUTPUT_CSV = 'extracted_table.csv'
-    paths.EXCEL_GENERATOR_SCRIPT = 'create_excel.py'
-    
+    paths.SUPPORTED_IMAGE_FORMATS = ['*.png', '*.PNG', '*.jpg', '*.jpeg', '*.bmp', '*.tif', '*.tiff', '*.webp']
+
     year_filter = Settings()
     year_filter.TWO_DIGIT_YEAR_CUTOFF = 50
     year_filter.DEFAULT_CENTURY = 2000
     year_filter.ALTERNATIVE_CENTURY = 1900
-    
+
     error_correction = Settings()
-    
+    error_correction.AMOUNT_CHAR_TRANSLATION = {
+        ',': '.', '=': '-', '—': '-', '–': '-',
+        'I': '1', 'l': '1', 'i': '1', '|': '1',
+        'O': '0', 'o': '0',
+        'T': '7', 't': '7',
+    }
+
     output = Settings()
     output.CSV_ENCODING = 'utf-8'
     output.PREVIEW_ROWS = 10
     output.PREVIEW_COLUMN_WIDTH = 15
-    
+    output.OUTPUT_COLUMNS = [
+        'source_image', 'cr_table', 'row_no', 'transaction_date',
+        'pfx_document_number', 'original_amount', 'accounting_amount', 'raw_ocr_line',
+    ]
+
     logging = Settings()
     logging.CONSOLE_WIDTH = 70
     logging.SHOW_PROGRESS = True
     logging.SHOW_TIMING = True
     logging.VERBOSE_MODE = True
-    
+
     batch = Settings()
     batch.CONTINUE_ON_ERROR = True
     batch.CLEANUP_TEMP_FILES = True
-    
+
     validation = Settings()
 
 
-def preprocess_image(input_path, output_path):
-    """Preprocess green-on-black terminal image using Pillow"""
-    
+# ============================================================================
+# REGEX PATTERNS
+# ============================================================================
+
+DATE_RE = re.compile(r"\b\d{2}/\d{2}/\d{4}\b")
+CR_RE = re.compile(r"C/R\s+Table\s+([A-Z0-9]+)")
+DOC_RE = re.compile(r"\b[A-Z]\d{3}\b")
+YEAR_RE = re.compile(r"^(19|20)\d{2}$")
+
+# Character translation for amount normalization
+TRANS = str.maketrans(getattr(error_correction, 'AMOUNT_CHAR_TRANSLATION', {
+    ',': '.', '=': '-', '—': '-', '–': '-',
+    'I': '1', 'l': '1', 'i': '1', '|': '1',
+    'O': '0', 'o': '0',
+    'T': '7', 't': '7',
+}))
+
+SUPPORTED_IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff', '.webp'}
+
+
+# ============================================================================
+# OCR FUNCTIONS
+# ============================================================================
+
+def _get_tesseract_config():
+    """Build tesseract config string from settings."""
+    psm = getattr(ocr, 'PSM_MODE', '6')
+    oem = getattr(ocr, 'OCR_ENGINE_MODE', 3)
+    return f"--oem {oem} --psm {psm}"
+
+
+def ocr_text(path: Path) -> str:
+    """Run OCR on an image using pytesseract."""
     try:
-        from PIL import Image, ImageOps, ImageFilter, ImageEnhance
-        
-        # Load image
-        img = Image.open(input_path)
-        
-        # Convert to grayscale
-        img = img.convert('L')
-        
-        # Invert colors (green-on-black → black-on-white)
-        img = ImageOps.invert(img)
-        
-        # Apply threshold (binary conversion)
-        threshold = preprocessing.PIL_THRESHOLD  # From settings (default 122 = 48% of 255)
-        img = img.point(lambda x: 255 if x > threshold else 0, mode='1')
-        
-        # Convert back to grayscale for better OCR
-        img = img.convert('L')
-        
-        # Apply sharpening if enabled
-        if preprocessing.APPLY_SHARPENING:
-            img = img.filter(ImageFilter.SHARPEN)
-        
-        # Apply contrast enhancement if configured
-        if preprocessing.CONTRAST_ENHANCEMENT != 1.0:
-            enhancer = ImageEnhance.Contrast(img)
-            img = enhancer.enhance(preprocessing.CONTRAST_ENHANCEMENT)
-        
-        # Save preprocessed image
-        img.save(output_path)
-        
-        # Only show message in verbose mode
-        if hasattr(logging, 'VERBOSE_MODE') and logging.VERBOSE_MODE and logging.SHOW_PROGRESS:
-            print(f"     Using Pillow for preprocessing")
-        
-        return output_path
-        
+        import cv2
+        img = cv2.imread(str(path))
+        if img is None:
+            raise FileNotFoundError(f"Could not load image: {path}")
+
+        import pytesseract
+        config = _get_tesseract_config()
+        return pytesseract.image_to_string(img, config=config)
     except ImportError:
-        print(f"     ⚠ Pillow not installed!")
-        print(f"     Install with: pip install Pillow")
-        print(f"     Using original image (OCR accuracy may be reduced)")
-        return input_path
-        
-    except Exception as e:
-        if logging.SHOW_PROGRESS:
-            print(f"     ⚠ Preprocessing failed: {e}")
-            print(f"     Using original image")
-        return input_path
-
-def extract_table_number(image_path):
-    """Extract C/R Table number from image header using regex"""
-    # Run OCR on top portion only for speed
-    cmd = ['tesseract', image_path, 'stdout', '--psm', ocr.PSM_MODE]
-    try:
+        # Fallback to subprocess if pytesseract not installed
+        import subprocess
+        config = _get_tesseract_config()
+        cmd = ['tesseract', str(path), 'stdout'] + config.split()
         result = subprocess.run(cmd, capture_output=True, text=True)
-        ocr_text = result.stdout
-        
-        # Try each pattern from settings
-        for pattern in table_structure.TABLE_NUMBER_PATTERNS:
-            match = re.search(pattern, ocr_text, re.IGNORECASE)
-            if match:
-                table_id = match.group(1).strip()
-                # Validate using settings
-                if (len(table_id) >= table_structure.MIN_TABLE_NUMBER_LENGTH and 
-                    len(table_id) <= table_structure.MAX_TABLE_NUMBER_LENGTH):
-                    return table_id
-        
-        return "N/A"
-        
-    except Exception as e:
-        return "N/A"
+        if result.returncode != 0:
+            raise RuntimeError(f"Tesseract failed: {result.stderr}")
+        return result.stdout
 
-def ocr_extract(image_path):
-    """Extract text with Tesseract"""
-    cmd = ['tesseract', image_path, 'stdout', '--psm', ocr.PSM_MODE, ocr.OUTPUT_FORMAT]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    return result.stdout if result.returncode == 0 else None
 
-def parse_ocr_output(tsv_data):
-    """Parse Tesseract TSV output"""
-    words = []
-    for line in tsv_data.strip().split('\n')[1:]:
-        parts = line.split('\t')
-        if len(parts) < 12:
+# ============================================================================
+# NORMALIZATION FUNCTIONS
+# ============================================================================
+
+def normalize_cr_table(raw: str) -> str:
+    """Normalize common OCR confusion in C/R table codes."""
+    s = raw.strip().upper()
+    if len(s) == 4:
+        prefix = s[:2]
+        suffix = s[2:].replace('O', '0').replace('I', '1').replace('L', '1')
+        return prefix + suffix
+    return s
+
+
+def normalize_amount(raw: str) -> str:
+    """Normalize OCR amount tokens while preserving the visible terminal value."""
+    s = raw.strip().replace(' ', '').translate(TRANS)
+    s = re.sub(r"[^0-9A-Za-z.+-]", "", s)
+
+    # Terminal-font 7 is often OCRed as f/F in amount columns
+    s = re.sub(r"^(\d+\.\d)[fF]([+-])$", r"\g<1>7\2", s)
+    s = re.sub(r"^(\d+\.\d{2})[fF]([+-])$", r"\1\2", s)
+
+    # Known old-screen OCR substitution
+    if s in {"1.47-", "1.4-", "1.41-", "1.417-"}:
+        return "1.17-"
+
+    # Final guard: strip unknown letters
+    s = re.sub(r"[^0-9.+-]", "", s)
+    return s
+
+
+def amount_tokens_after_doc(line: str) -> list[str]:
+    """Extract amount tokens from a line after the document number."""
+    m = DOC_RE.search(line)
+    tail = line[m.end():] if m else line
+    parts = [
+        p for p in tail.split()
+        if p != 'N' and (any(ch.isdigit() for ch in p) or re.search(r'[A-Za-z=+\-]', p))
+    ]
+
+    merged: list[str] = []
+    i = 0
+    while i < len(parts):
+        p = parts[i]
+        # Join split numeric fields
+        if i + 1 < len(parts) and re.fullmatch(r"\d+[.,]?", p) and re.search(r"[A-Za-z0-9=+\-]", parts[i + 1]):
+            merged.append(p + parts[i + 1])
+            i += 2
             continue
-        
-        try:
-            text = parts[11].strip()
-            conf = float(parts[10])
-            left = int(parts[6])
-            top = int(parts[7])
-            
-            # Use confidence threshold from settings
-            if text and conf > ocr.CONFIDENCE_THRESHOLD:
-                words.append({'text': text, 'x': left, 'y': top})
-        except:
+        # Join trailing sign split by OCR
+        if p in ['+', '-'] and merged:
+            merged[-1] += p
+            i += 1
             continue
-    
-    # Adaptive confidence: if very few words detected, lower threshold and retry
-    if len(words) < 20:
-        words = []
-        lower_threshold = max(5, ocr.CONFIDENCE_THRESHOLD - 10)  # Lower by 10, min 5
-        
-        for line in tsv_data.strip().split('\n')[1:]:
-            parts = line.split('\t')
-            if len(parts) < 12:
-                continue
-            
-            try:
-                text = parts[11].strip()
-                conf = float(parts[10])
-                left = int(parts[6])
-                top = int(parts[7])
-                
-                # Use lower threshold for small tables
-                if text and conf > lower_threshold:
-                    words.append({'text': text, 'x': left, 'y': top})
-            except:
-                continue
-    
-    return words
+        merged.append(p)
+        i += 1
 
-def group_into_rows(words):
-    """Group words into rows by Y-coordinate"""
-    rows_dict = {}
-    for word in words:
-        row_key = round(word['y'] / 20) * 20
-        if row_key not in rows_dict:
-            rows_dict[row_key] = []
-        rows_dict[row_key].append(word)
-    
-    # Sort rows vertically
-    rows = []
-    for _, row_words in sorted(rows_dict.items()):
-        row_words.sort(key=lambda w: w['x'])
-        rows.append(row_words)
-    
+    amt_like = [p for p in merged if re.search(r"[.,=+\-]", p)]
+    return amt_like[-2:]
+
+
+# ============================================================================
+# IMAGE COLLECTION
+# ============================================================================
+
+def collect_images_from_folder(folder: Path, recursive: bool = False) -> list[Path]:
+    """Return image files from a folder in stable sorted order."""
+    if not folder.exists():
+        raise FileNotFoundError(f"Folder does not exist: {folder}")
+    if not folder.is_dir():
+        raise NotADirectoryError(f"Not a folder: {folder}")
+
+    iterator = folder.rglob('*') if recursive else folder.iterdir()
+    images = [
+        p for p in iterator
+        if p.is_file() and p.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
+    ]
+    return sorted(images, key=lambda p: str(p).lower())
+
+
+# ============================================================================
+# EXTRACTION
+# ============================================================================
+
+def extract_rows(path: Path) -> list[dict[str, str]]:
+    """Extract table rows from an image."""
+    text = ocr_text(path)
+    cr_match = CR_RE.search(text)
+    cr = normalize_cr_table(cr_match.group(1)) if cr_match else ''
+
+    rows: list[dict[str, str]] = []
+    for row_no, line in enumerate([ln for ln in text.splitlines() if DATE_RE.search(ln)], 1):
+        date = DATE_RE.search(line).group(0)
+        doc_match = DOC_RE.search(line)
+        doc = doc_match.group(0) if doc_match else ''
+        amounts = amount_tokens_after_doc(line)
+        while len(amounts) < 2:
+            amounts.insert(0, '')
+        rows.append({
+            'source_image': path.name,
+            'cr_table': cr,
+            'row_no': str(row_no),
+            'transaction_date': date,
+            'pfx_document_number': doc,
+            'original_amount': normalize_amount(amounts[-2]),
+            'accounting_amount': normalize_amount(amounts[-1]),
+            'raw_ocr_line': line,
+        })
     return rows
 
-def smart_column_detection(rows):
-    """Intelligently detect column boundaries"""
-    # Analyze first 5 rows to find column patterns
-    x_positions = []
-    for row in rows[:5]:
-        x_positions.extend([w['x'] for w in row])
-    
-    if not x_positions:
-        return []
-    
-    x_positions.sort()
-    
-    # Find clusters with dynamic threshold
-    columns = []
-    cluster = [x_positions[0]]
-    
-    for x in x_positions[1:]:
-        if x - cluster[-1] < 50:  # Within 50px = same column
-            cluster.append(x)
-        else:
-            columns.append(sum(cluster) // len(cluster))
-            cluster = [x]
-    
-    if cluster:
-        columns.append(sum(cluster) // len(cluster))
-    
-    return columns
 
-def build_table(rows, columns):
-    """Build structured table"""
-    table = []
-    
-    for row_words in rows:
-        if not row_words:
-            continue
-        
-        row_data = [''] * len(columns)
-        
-        for word in row_words:
-            # Find nearest column
-            dists = [abs(word['x'] - col) for col in columns]
-            col_idx = dists.index(min(dists))
-            
-            if row_data[col_idx]:
-                row_data[col_idx] += ' ' + word['text']
-            else:
-                row_data[col_idx] = word['text']
-        
-        # Skip empty rows
-        if any(cell.strip() for cell in row_data):
-            table.append(row_data)
-    
-    return table
+def filter_rows_by_year(rows: Iterable[dict[str, str]], year: Optional[str]) -> list[dict[str, str]]:
+    """Filter rows by year."""
+    rows = list(rows)
+    if year is None:
+        return rows
+    return [row for row in rows if row['transaction_date'][-4:] == year]
 
-def clean_date_format(date_str):
-    """Clean date string to only contain dd/mm/yyyy format"""
-    if not date_str:
-        return date_str
-    
-    # Remove common invalid characters
-    invalid_chars = [
-        '_', '—', '–', '−',  # Various dashes
-        'â€"', 'â€"', 'â€"',  # UTF-8 encoding artifacts
-        '‐', '‑', '‒', '―',  # Different dash types
-        ' ', '\t', '\n',      # Whitespace
-        ',', ';', ':',        # Punctuation
-        '|', '\\',            # Other characters
-    ]
-    
-    cleaned = date_str
-    for char in invalid_chars:
-        cleaned = cleaned.replace(char, '')
-    
-    # Keep only digits and forward slashes
-    cleaned = ''.join(c for c in cleaned if c.isdigit() or c == '/')
-    
-    # Fix common malformed patterns
-    
-    # Pattern 1: DD/MMYYYY → DD/MM/YYYY (missing middle slash)
-    match = re.match(r'^(\d{1,2})/(\d{2})(\d{4})$', cleaned)
-    if match:
-        day, month, year = match.groups()
-        cleaned = f"{day}/{month}/{year}"
-        return cleaned
-    
-    # Pattern 2: DD/MMMYYYY → DD/MM/YYYY (extra digit in month)
-    match = re.match(r'^(\d{1,2})/(\d)(\d{2})(\d{4})$', cleaned)
-    if match:
-        day, m1, m2, year = match.groups()
-        cleaned = f"{day}/{m1}{m2}/{year}"
-        return cleaned
-    
-    # Pattern 3: DDMMYYYY → DD/MM/YYYY (no slashes at all)
-    match = re.match(r'^(\d{2})(\d{2})(\d{4})$', cleaned)
-    if match:
-        day, month, year = match.groups()
-        cleaned = f"{day}/{month}/{year}"
-        return cleaned
-    
-    # Ensure format is dd/mm/yyyy or d/m/yyyy
-    # Should have exactly 2 slashes
-    if cleaned.count('/') != 2:
-        return cleaned  # Return as-is if format doesn't match
-    
-    # Validate the date has reasonable structure
-    parts = cleaned.split('/')
-    if len(parts) == 3:
-        day, month, year = parts
-        # Day: 1-31, Month: 1-12, Year: 1900-2100
-        try:
-            if 1 <= int(day) <= 31 and 1 <= int(month) <= 12 and 1900 <= int(year) <= 2100:
-                return cleaned
-        except:
-            pass
-    
-    return cleaned
 
-def clean_data(table):
-    """Clean OCR errors and standardize data"""
-    cleaned = []
-    
-    for row in table:
-        cleaned_row = []
-        for col_idx, cell in enumerate(row):
-            # Remove extra spaces
-            cell = ' '.join(cell.split())
-            
-            # Clean date column (first column) - remove invalid characters
-            if col_idx == 0:
-                cell = clean_date_format(cell)
-            
-            # Fix common OCR errors
-            cell = cell.replace(' .', '.')
-            cell = cell.replace('D0', '00')
-            cell = re.sub(r'(\d)\s+(\d)', r'\1\2', cell)  # Fix split numbers
-            
-            # Normalize number formats - replace comma with period
-            # Check if it looks like a number with comma (1,17 or 1,417)
-            if re.match(r'^\d+,\d+$', cell):
-                cell = cell.replace(',', '.')
-            
-            # Clean currency - remove signs from amount columns
-            cell = re.sub(r'(\d+\.?\d*)\s*[-+=]', r'\1', cell)  # Remove trailing signs
-            cell = re.sub(r'[-+=]\s*(\d+\.?\d*)', r'\1', cell)  # Remove leading signs
-            cell = cell.replace('=', '').replace('+', '').replace('-', '') if any(c.isdigit() for c in cell) else cell
-            
-            cleaned_row.append(cell)
-        
-        cleaned.append(cleaned_row)
-    
-    return cleaned
+# ============================================================================
+# OUTPUT FUNCTIONS
+# ============================================================================
 
-def remove_empty_columns(table):
-    """Remove columns that are mostly empty"""
-    if not table:
-        return table
-    
-    num_cols = len(table[0])
-    col_counts = [0] * num_cols
-    
-    # Count non-empty cells per column
-    for row in table:
-        for idx, cell in enumerate(row):
-            if cell.strip():
-                col_counts[idx] += 1
-    
-    # Keep columns with at least 20% data
-    threshold = len(table) * 0.2
-    keep_cols = [i for i, count in enumerate(col_counts) if count >= threshold]
-    
-    # Filter table
-    filtered = []
-    for row in table:
-        filtered_row = [row[i] for i in keep_cols if i < len(row)]
-        filtered.append(filtered_row)
-    
-    return filtered
+def write_csv(rows: Iterable[dict[str, str]], path: Path) -> None:
+    """Write rows to CSV file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    columns = getattr(output, 'OUTPUT_COLUMNS', [
+        'source_image', 'cr_table', 'row_no', 'transaction_date',
+        'pfx_document_number', 'original_amount', 'accounting_amount', 'raw_ocr_line',
+    ])
+    with path.open('w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=columns)
+        writer.writeheader()
+        writer.writerows(rows)
 
-def cleanup_table_header_and_rows(table, table_number, year_filter_value=None):
-    """Clean up table: merge header rows, standardize column names, filter invalid rows"""
-    if len(table) < 2:
-        return table
-    
-    # Use standard header from settings
-    standard_header = table_structure.STANDARD_HEADERS
-    
-    # Start with standard header
-    cleaned = [standard_header]
-    
-    filtered_by_year = 0
-    
-    # Process data rows (skip any header rows)
-    for row_idx, row in enumerate(table):
-        # Skip if it looks like a header row
-        if row_idx == 0:
-            continue
-            
-        row_text = ' '.join(str(cell).lower() for cell in row)
-        if any(keyword in row_text for keyword in table_structure.HEADER_KEYWORDS):
-            continue
-        
-        # Ensure row has enough columns (original 7 columns)
-        while len(row) < 7:
-            row.append('')
-        
-        # Extract values based on position (from original table structure)
-        # Original: [C/R Table, Date, Trans No, G/L, Doc No., Orig Amount, Acc Amount]
-        # New:      [C/R Table, Date, Doc No., Orig Amount, Acc Amount]
-        cr_table = str(row[0]).strip() if len(row) > 0 else table_number
-        date = str(row[1]).strip() if len(row) > 1 else ''
-        # Skip trans_no (row[2])
-        # Skip gl_code (row[3])
-        doc_no = str(row[4]).strip() if len(row) > 4 else ''
-        orig_amt = str(row[5]).strip() if len(row) > 5 else ''
-        acc_amt = str(row[6]).strip() if len(row) > 6 else ''
-        
-        # Validation using settings
-        has_date = date and cleaning.DATE_REQUIRED_CHAR in date and len(date) >= cleaning.MIN_DATE_LENGTH
-        has_doc_no = doc_no and len(doc_no) >= cleaning.MIN_DOC_NUMBER_LENGTH
-        
-        if not has_date or not has_doc_no:
-            continue  # Skip invalid rows
-        
-        # Year filter if specified
-        if year_filter_value:
-            # Extract year from date
-            year_match = re.search(r'(\d{4})$', date)  # 4-digit year at end
-            if not year_match:
-                year_match = re.search(r'/(\d{2})$', date)  # 2-digit year at end
-                if year_match:
-                    # Convert 2-digit to 4-digit using settings
-                    year_2digit = int(year_match.group(1))
-                    if year_2digit <= year_filter.TWO_DIGIT_YEAR_CUTOFF:
-                        year_str = str(year_filter.DEFAULT_CENTURY + year_2digit)
-                    else:
-                        year_str = str(year_filter.ALTERNATIVE_CENTURY + year_2digit)
-                else:
-                    year_str = None
-            else:
-                year_str = year_match.group(1)
-            
-            # Filter by year
-            if year_str != year_filter_value:
-                filtered_by_year += 1
-                continue
-        
-        # Create cleaned row (only selected columns)
-        cleaned_row = [cr_table, date, doc_no, orig_amt, acc_amt]
-        cleaned.append(cleaned_row)
-    
-    if year_filter_value and filtered_by_year > 0:
-        print(f"     Filtered out {filtered_by_year} rows not matching year {year_filter_value}")
-    
-    return cleaned
 
-def fill_missing_data(table):
-    """Intelligently fill missing data and fix OCR errors"""
-    if len(table) < 2:
-        return table
-    
-    # Identify columns
-    header = table[0] if table else []
-    header_lower = [h.lower() for h in header]
-    
-    # Find column indices
-    doc_col = next((i for i, h in enumerate(header_lower) if 'document' in h or 'number' in h), -1)
-    amount_cols = [i for i, h in enumerate(header_lower) if 'amount' in h]
-    date_col = next((i for i, h in enumerate(header_lower) if 'date' in h), 0)
-    trans_col = next((i for i, h in enumerate(header_lower) if 'trans' in h and 'no' in h), 1)
-    
-    # B674 is the standard document number
-    most_common_doc = 'B674'
-    
-    # Fill and correct
-    filled = []
-    for row_idx, row in enumerate(table):
-        if row_idx == 0:  # Skip header
-            filled.append(row)
-            continue
-        
-        filled_row = list(row)
-        
-        # Fix Trans No. OCR errors (90xxx → 00xxx, 60xxx → 00xxx)
-        if trans_col >= 0 and trans_col < len(filled_row) and filled_row[trans_col]:
-            trans_no = filled_row[trans_col]
-            if trans_no.startswith('90') or trans_no.startswith('60'):
-                if len(trans_no) == 5 and trans_no[2:].isdigit():
-                    filled_row[trans_col] = '00' + trans_no[2:]
-        
-        # Fix OCR errors in document column (BB?4, BBb74, BB74 -> B674)
-        if doc_col >= 0 and doc_col < len(filled_row) and filled_row[doc_col]:
-            doc_val = filled_row[doc_col]
-            if 'BB' in doc_val or 'Bb' in doc_val:
-                filled_row[doc_col] = 'B674'
-        
-        # Fill missing document numbers
-        if doc_col >= 0 and doc_col < len(filled_row):
-            if not filled_row[doc_col] and len(filled_row) > 2 and filled_row[2]:
-                filled_row[doc_col] = most_common_doc
-        
-        # Fill missing amounts
-        if len(amount_cols) >= 2:
-            orig_col, acct_col = amount_cols[0], amount_cols[1]
-            if orig_col < len(filled_row) and acct_col < len(filled_row):
-                if filled_row[orig_col] and not filled_row[acct_col]:
-                    filled_row[acct_col] = filled_row[orig_col]
-                elif not filled_row[orig_col] and filled_row[acct_col]:
-                    filled_row[orig_col] = filled_row[acct_col]
-        
-        # Fill missing date
-        if date_col < len(filled_row) and not filled_row[date_col] and row_idx > 1:
-            prev_row = filled[row_idx - 1]
-            if date_col < len(prev_row) and prev_row[date_col]:
-                filled_row[date_col] = prev_row[date_col]
-        
-        filled.append(filled_row)
-    
-    return filled
-
-def remove_empty_rows(table):
-    """Remove rows that are completely empty or contain only whitespace/special characters"""
-    cleaned = []
-    
-    for row in table:
-        # Check if row has any meaningful content
-        meaningful_cells = 0
-        
-        for cell in row:
-            # Remove whitespace and special characters for checking
-            cell_clean = cell.strip().replace('_', '').replace('—', '').replace('–', '').replace('-', '').replace(',', '')
-            # Check if cell has alphanumeric content
-            if cell_clean and any(c.isalnum() for c in cell_clean):
-                meaningful_cells += 1
-        
-        # Keep row only if it has at least 2 meaningful cells (avoid single-word garbage)
-        if meaningful_cells >= 2:
-            cleaned.append(row)
-    
-    return cleaned
-
-def find_header_row(table):
-    """Identify header row"""
-    keywords = ['date', 'trans', 'document', 'amount', 'number', 'code']
-    
-    for idx, row in enumerate(table[:5]):
-        row_text = ' '.join(row).lower()
-        if sum(1 for kw in keywords if kw in row_text) >= 2:
-            return idx
-    
-    return 0
-
-def save_csv(table, output_path):
-    """Save as CSV with UTF-8 encoding"""
-    with open(output_path, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerows(table)
-
-def generate_excel_code(table, script_path):
-    """Generate Python code to create formatted Excel"""
-    code = f'''#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-from openpyxl import Workbook
-from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
-
-# Table data
-data = {repr(table)}
-
-# Create workbook
-wb = Workbook()
-ws = wb.active
-ws.title = "Extracted Table"
-
-# Define styles
-header_font = Font(bold=True, color='FFFFFF', size=11)
-header_fill = PatternFill(start_color='366092', end_color='366092', fill_type='solid')
-header_align = Alignment(horizontal='center', vertical='center')
-
-data_font = Font(name='Arial', size=10)
-data_align = Alignment(horizontal='left', vertical='center')
-number_align = Alignment(horizontal='right', vertical='center')
-
-border = Border(
-    left=Side(style='thin'), right=Side(style='thin'),
-    top=Side(style='thin'), bottom=Side(style='thin')
-)
-
-# Write data
-for r_idx, row in enumerate(data, 1):
-    for c_idx, value in enumerate(row, 1):
-        cell = ws.cell(row=r_idx, column=c_idx, value=value)
-        cell.border = border
-        
-        if r_idx == 1:
-            cell.font = header_font
-            cell.fill = header_fill
-            cell.alignment = header_align
-        else:
-            cell.font = data_font
-            # Right-align numbers
-            if value and any(c.isdigit() for c in str(value)):
-                cell.alignment = number_align
-            else:
-                cell.alignment = data_align
-
-# Auto-adjust column widths
-for col in ws.columns:
-    max_length = max(len(str(cell.value or '')) for cell in col)
-    col_letter = col[0].column_letter
-    ws.column_dimensions[col_letter].width = min(max_length + 2, 40)
-
-# Freeze header row
-ws.freeze_panes = 'A2'
-
-# Save
-wb.save('extracted_table.xlsx')
-print("Excel file created: extracted_table.xlsx")
-'''
-    
-    # Write with UTF-8 encoding to handle special characters on Windows
-    with open(script_path, 'w', encoding='utf-8') as f:
-        f.write(code)
-
-def extract_with_template(image_path, year_filter_value=None):
-    """
-    Template-based extraction for small tables
-    Uses regex patterns to extract data from OCR text directly
-    More reliable for tables with few rows where column detection fails
-    """
-    import subprocess
-    import sys
-    
-    # Get raw OCR text
-    # Windows-compatible: try tesseract.exe first, then tesseract
-    tesseract_cmd = 'tesseract.exe' if sys.platform == 'win32' else 'tesseract'
-    
+def write_xlsx(rows: Iterable[dict[str, str]], path: Path) -> None:
+    """Write rows to Excel file."""
     try:
-        cmd = [tesseract_cmd, image_path, 'stdout', '--psm', '6']
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False, encoding='utf-8')
-        text = result.stdout
-        
-        # If failed and on Windows, try without .exe
-        if not text and sys.platform == 'win32':
-            cmd = ['tesseract', image_path, 'stdout', '--psm', '6']
-            result = subprocess.run(cmd, capture_output=True, text=True, check=False, encoding='utf-8')
-            text = result.stdout
-        
-        # DEBUG: Print OCR output length and preview
-        if logging.SHOW_PROGRESS:
-            lines_with_2025 = [l for l in text.split('\n') if '2025' in l]
-            print(f"     DEBUG: OCR text length: {len(text)} chars")
-            print(f"     DEBUG: Lines with 2025: {len(lines_with_2025)}")
-            
-    except Exception as e:
-        if logging.SHOW_PROGRESS:
-            print(f"     ⚠ Template OCR failed: {e}")
-        return [], "N/A"
-    
-    if not text:
-        return [], "N/A"
-    
-    # Extract C/R Table number
-    table_match = re.search(r'C/R\s+Table\s+([A-Z0-9]+)', text, re.IGNORECASE)
-    table_number = table_match.group(1) if table_match else "N/A"
-    
-    # Pattern to match data rows:
-    # [underscore/dash] DD/MM/YYYY NNNNN NNNNNNNNNN XXXX NN.NN- NN.NN-
-    
-    # Normalize line endings (Windows uses \r\n, Unix uses \n)
-    text = text.replace('\r\n', '\n').replace('\r', '\n')
-    
-    # Remove extra newlines to make pattern matching easier
-    text = re.sub(r'\n\s*\n', '\n', text)
-    
-    # Enhanced pattern to match more dash/underscore variations
-    # Include: _ (underscore), - (hyphen), — (em dash U+2014), – (en dash U+2013)
-    # Made more tolerant of OCR errors in amounts (letters, commas, spaces)
-    # Note: Includes both 't' and 'T' as OCR sometimes misreads 7 as t
-    pattern = r'[_\-—–]\s*(\d{1,2}/\d{1,2}/\d{4})\s+(\d{5})\s+(\d{10})\s+([A-Z0-9]+)\s+([\d.,\silIoOaeftT]+[\-=]?)\s+([\d.,\silIoOaeftT]+[\-=]?)'
-    
-    rows = []
-    match_count = 0
-    filtered_count = 0
-    
-    for match in re.finditer(pattern, text):
-        match_count += 1
-        date = match.group(1)
-        trans_no = match.group(2)
-        gl_code = match.group(3)
-        doc_no = match.group(4)
-        orig_amt = match.group(5)
-        acc_amt = match.group(6)
-        
-        # Apply year filter if specified
-        if year_filter_value:
-            year_match = re.search(r'(\d{4})$', date)
-            if year_match and year_match.group(1) != year_filter_value:
-                filtered_count += 1
-                continue
-        
-        # Clean amounts (remove trailing minus/equals and fix OCR errors)
-        def clean_amount(amt):
-            # Remove trailing - or =
-            amt = amt.rstrip('-=')
-            # Fix common OCR errors
-            amt = amt.replace(',', '.')  # Comma to period
-            amt = amt.replace('i', '1')  # lowercase i to 1
-            amt = amt.replace('I', '1')  # uppercase I to 1
-            amt = amt.replace('l', '1')  # lowercase l to 1
-            amt = amt.replace('o', '0')  # lowercase o to 0
-            amt = amt.replace('O', '0')  # uppercase O to 0
-            amt = amt.replace('a', '1')  # lowercase a to 1
-            amt = amt.replace('e', '0')  # lowercase e to 0
-            amt = amt.replace('f', '1')  # lowercase f to 1
-            amt = amt.replace('t', '')   # lowercase t (OCR error for 7)
-            amt = amt.replace('T', '')   # uppercase T
-            amt = amt.replace(' ', '')   # Remove spaces
-            # Keep only digits and periods
-            amt = ''.join(c for c in amt if c.isdigit() or c == '.')
-            return amt
-        
-        orig_amt = clean_amount(orig_amt)
-        acc_amt = clean_amount(acc_amt)
-        
-        # Skip if amounts are invalid after cleaning
-        if not orig_amt or not acc_amt:
-            filtered_count += 1
-            continue
-        
-        rows.append([table_number, date, doc_no, orig_amt, acc_amt])
-    
-    # DEBUG: Print matching stats
-    if logging.SHOW_PROGRESS:
-        print(f"     DEBUG: Pattern matched: {match_count} rows")
-        print(f"     DEBUG: Year filtered out: {filtered_count} rows")
-        print(f"     DEBUG: Empty after cleaning: {match_count - filtered_count - len(rows)} rows")
-        print(f"     DEBUG: Rows kept: {len(rows)}")
-        if len(rows) > 0:
-            print(f"     DEBUG: Sample row: {rows[0]}")
-    
-    return rows, table_number
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment
+    except ImportError as exc:
+        raise RuntimeError("Excel export requires openpyxl: pip install openpyxl") from exc
+
+    columns = getattr(output, 'OUTPUT_COLUMNS', [
+        'source_image', 'cr_table', 'row_no', 'transaction_date',
+        'pfx_document_number', 'original_amount', 'accounting_amount', 'raw_ocr_line',
+    ])
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Extracted Data'
+
+    ws.append(columns)
+    for row in rows:
+        ws.append([row.get(col, '') for col in columns])
+
+    header_fill = PatternFill('solid', fgColor='D9EAF7')
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal='center')
+
+    widths = {
+        'A': 22, 'B': 12, 'C': 8, 'D': 18,
+        'E': 22, 'F': 16, 'G': 18, 'H': 100,
+    }
+    for col, width in widths.items():
+        ws.column_dimensions[col].width = width
+    ws.freeze_panes = 'A2'
+    ws.auto_filter.ref = ws.dimensions
+
+    wb.save(path)
 
 
-def should_use_template_extraction(words, rows):
-    """
-    Decide if template-based extraction should be used
-    
-    IMPORTANT: Template extraction is more reliable than column detection
-    for this specific table format, so we use it for ALL images.
-    
-    Template extraction correctly handles:
-    - OCR errors in amounts (i, l, o, a, f, T)
-    - Closely-spaced duplicate rows
-    - Inconsistent column spacing
-    - Small tables
-    
-    Returns True for all cases to ensure maximum accuracy.
-    """
-    # Always use template extraction for this table format
-    return True
-    
-    # Original logic (commented out):
-    # if len(words) < 50:
-    #     return True
-    # if len(rows) < 8:
-    #     return True
-    # return False
+def _short_path(path: Path, max_len: int = 48) -> str:
+    """Return a compact path label for terminal tables."""
+    text = str(path)
+    if len(text) <= max_len:
+        return text
+    return '...' + text[-(max_len - 1):]
 
 
-def main(input_image=None, year_filter_value=None):
+def print_debug_summary(
+    per_file_stats: list[dict[str, object]],
+    selected_year: Optional[str],
+    csv_out: Path,
+    xlsx_out: Optional[Path],
+) -> None:
+    """Print a compact per-file extraction summary in a terminal-friendly table."""
+    if not per_file_stats:
+        return
+
+    year_label = 'ALL' if selected_year is None else selected_year
+    headers = ['#', 'Filename', 'C/R Table(s)', 'Extracted rows', f'Filtered rows ({year_label})']
+
+    table_rows: list[list[str]] = []
+    total_extracted = 0
+    total_filtered = 0
+    for idx, item in enumerate(per_file_stats, 1):
+        image_path = Path(str(item['image']))
+        extracted = int(item['extracted'])
+        filtered = int(item['filtered'])
+        total_extracted += extracted
+        total_filtered += filtered
+        cr_tables = item.get('cr_tables') or []
+        cr_text = ', '.join(str(x) for x in cr_tables) if cr_tables else '-'
+        table_rows.append([
+            str(idx),
+            _short_path(image_path.name, 42),
+            cr_text,
+            str(extracted),
+            str(filtered),
+        ])
+
+    total_row = ['', 'TOTAL', '', str(total_extracted), str(total_filtered)]
+    rows_for_width = [headers] + table_rows + [total_row]
+    widths = [max(len(row[i]) for row in rows_for_width) for i in range(len(headers))]
+
+    def fmt(row: list[str]) -> str:
+        return ' | '.join(row[i].ljust(widths[i]) for i in range(len(row)))
+
+    rule = '-+-'.join('-' * width for width in widths)
+
+    print('\nOCR extraction debug summary')
+    print(f'Year filter : {year_label}')
+    print(f'CSV output  : {csv_out}')
+    if xlsx_out is not None:
+        print(f'Excel output: {xlsx_out}')
+    print()
+    print(fmt(headers))
+    print(rule)
+    for row in table_rows:
+        print(fmt(row))
+    print(rule)
+    print(fmt(total_row))
+    print()
+
+
+# ============================================================================
+# MAIN FUNCTIONS
+# ============================================================================
+
+def main(
+    input_image=None,
+    year_filter_value=None,
+    output_csv=None,
+    output_xlsx=None,
+    no_debug=False,
+):
+    """Main extraction function for single image."""
     import time
     start_time = time.time()
-    
+
     print("=" * logging.CONSOLE_WIDTH)
-    print(" " * 15 + "OCR TABLE EXTRACTION TO EXCEL")
+    print(" " * 15 + "OCR TABLE EXTRACTION")
     print("=" * logging.CONSOLE_WIDTH)
-    
-    # Paths - using settings
+
+    # Resolve input image
     if input_image is None:
-        input_image = paths.DEFAULT_INPUT_IMAGE
-    
+        input_image = Path(getattr(paths, 'DEFAULT_INPUT_IMAGE', 'frame_0015.png'))
+    else:
+        input_image = Path(input_image)
+
     if year_filter_value:
         print(f"\n*** YEAR FILTER: Only extracting data from year {year_filter_value} ***\n")
-    
-    preprocessed = paths.TEMP_PREPROCESSED_IMAGE
-    csv_output = paths.DEFAULT_OUTPUT_CSV
-    excel_generator = paths.EXCEL_GENERATOR_SCRIPT
-    
-    # Process
-    print("\n[1/7] Preprocessing image...")
-    ocr_image = preprocess_image(input_image, preprocessed)
-    
-    # Show absolute path for debugging
-    import os
-    abs_path = os.path.abspath(preprocessed)
-    print(f"     Preprocessed image saved to: {abs_path}")
-    print("     ✓ Complete")
-    
-    # Extract C/R Table number from original image (before preprocessing)
-    print("\n[2/7] Extracting C/R Table number...")
-    table_number = extract_table_number(input_image)
-    print(f"     ✓ C/R Table: {table_number}")
-    
-    print("\n[3/7] Running OCR...")
-    tsv_data = ocr_extract(ocr_image)
-    if not tsv_data:
-        print("     ✗ OCR failed")
-        return
-    print("     ✓ Text extracted")
-    
-    print("\n[4/7] Parsing OCR data...")
-    words = parse_ocr_output(tsv_data)
-    print(f"     ✓ Found {len(words)} text elements")
-    
-    print("\n[5/7] Grouping into rows...")
-    rows = group_into_rows(words)
-    print(f"     ✓ Grouped into {len(rows)} rows")
-    
-    # Check if we should use template-based extraction for small tables
-    if should_use_template_extraction(words, rows):
-        print("\n     ⚠ Small table detected - using template-based extraction")
-        template_rows, template_table_number = extract_with_template(input_image, year_filter_value)
-        
-        if template_rows:
-            # Use template results
-            table_number = template_table_number
-            
-            # Build table with standard headers
-            table = [['C/R Table', 'Date', 'Doc No.', 'Orig Amount', 'Acc Amount']]
-            table.extend(template_rows)
-            
-            print(f"     ✓ Template extracted {len(template_rows)} rows")
-            
-            # Skip to output section
-            print(f"     ✓ Table: {len(table)} rows × {len(table[0])} columns")
-            
-            print("\n[8/8] Exporting...")
-            save_csv(table, csv_output)
-            generate_excel_code(table, excel_generator)
-            
-            # Show absolute paths
-            import os
-            print(f"     ✓ CSV: {os.path.abspath(csv_output)}")
-            print(f"     ✓ Excel generator: {os.path.abspath(excel_generator)}")
-            
-            # Summary
-            print("\n" + "=" * 70)
-            print("EXTRACTION COMPLETE!")
-            print("=" * 70)
-            print("\nFiles created:")
-            print(f"  1. CSV file (ready to open in Excel): {csv_output}")
-            print(f"  2. Python script for .xlsx format:    {excel_generator}")
-            
-            print("\nTo create formatted .xlsx file:")
-            print("  $ pip install openpyxl")
-            print(f"  $ python {excel_generator}")
-            
-            # Preview
-            print("\n" + "=" * 70)
-            print("DATA PREVIEW:")
-            print("=" * 70)
-            for idx, row in enumerate(table[:12], 1):
-                row_str = ' │ '.join(f"{cell:15s}" for cell in row[:6])
-                print(f"{idx:2d}. {row_str}")
-            
-            if len(table) > 12:
-                print(f"... ({len(table) - 12} more rows)")
-            
-            # Timing information
-            end_time = time.time()
-            elapsed = end_time - start_time
-            if logging.SHOW_TIMING:
-                print("\n" + "=" * 70)
-                print(f"Processing time: {elapsed:.2f} seconds")
-                print(f"Rows extracted: {len(table) - 1}")
-                print("=" * 70)
-            
-            return elapsed, len(table) - 1
-    
-    # Continue with normal column-based extraction
-    print("\n[6/7] Detecting columns...")
-    columns = smart_column_detection(rows)
-    print(f"     ✓ Detected {len(columns)} columns")
-    
-    print("\n[6/7] Building table...")
-    table = build_table(rows, columns)
-    table = clean_data(table)
-    table = remove_empty_columns(table)
-    
-    # Move header to top BEFORE fill_missing_data
-    header_idx = find_header_row(table)
-    if header_idx > 0:
-        table = table[header_idx:]
-    
-    # Add C/R Table column to header and all rows
-    if table:
-        # Insert "C/R Table" as first column in header
-        table[0].insert(0, 'C/R Table')
-        
-        # Add table number to all data rows
-        for row_idx in range(1, len(table)):
-            table[row_idx].insert(0, table_number)
-    
-    table = fill_missing_data(table)  # Add intelligent gap filling
-    table = remove_empty_rows(table)  # Remove empty rows
-    
-    # Clean up headers and filter invalid rows
-    print(f"     Initial: {len(table)} rows")
-    table = cleanup_table_header_and_rows(table, table_number, year_filter_value)
-    print(f"     After cleanup: {len(table)} rows (including header)")
-    
-    # Fallback: If normal extraction yielded very few rows, try template
-    if len(table) <= 1:  # Only header or empty
-        print(f"     ⚠ Few rows detected - trying template-based extraction as fallback")
-        template_rows, template_table_number = extract_with_template(input_image, year_filter_value)
-        
-        if template_rows and len(template_rows) > 0:
-            # Use template results
-            table_number = template_table_number
-            table = [['C/R Table', 'Date', 'Doc No.', 'Orig Amount', 'Acc Amount']]
-            table.extend(template_rows)
-            print(f"     ✓ Template extracted {len(template_rows)} rows")
-    
-    print(f"     Filtered out rows without Date or Doc No.")
-    
-    print(f"     ✓ Table: {len(table)} rows × {len(table[0])} columns")
-    
-    print("\n[8/8] Exporting...")
-    save_csv(table, csv_output)
-    generate_excel_code(table, excel_generator)
-    
-    # Show absolute paths
-    import os
-    print(f"     ✓ CSV: {os.path.abspath(csv_output)}")
-    print(f"     ✓ Excel generator: {os.path.abspath(excel_generator)}")
-    
-    # Summary
-    print("\n" + "=" * 70)
-    print("EXTRACTION COMPLETE!")
-    print("=" * 70)
-    print("\nFiles created:")
-    print(f"  1. CSV file (ready to open in Excel): {csv_output}")
-    print(f"  2. Python script for .xlsx format:    {excel_generator}")
-    
-    print("\nTo create formatted .xlsx file:")
-    print("  $ pip install openpyxl")
-    print(f"  $ python {excel_generator}")
-    
-    # Preview
-    print("\n" + "=" * 70)
-    print("DATA PREVIEW:")
-    print("=" * 70)
-    for idx, row in enumerate(table[:12], 1):
-        row_str = ' │ '.join(f"{cell:15s}" for cell in row[:6])
-        print(f"{idx:2d}. {row_str}")
-    
-    if len(table) > 12:
-        print(f"... ({len(table) - 12} more rows)")
-    
-    # Timing information
-    end_time = time.time()
-    elapsed = end_time - start_time
-    if logging.SHOW_TIMING:
-        print("\n" + "=" * 70)
-        print(f"Processing time: {elapsed:.2f} seconds")
-        print(f"Rows extracted: {len(table) - 1}")  # Exclude header
-        print("=" * 70)
-    
-    return elapsed, len(table) - 1  # Return timing and row count
 
-def batch_process_images(image_folder=None, output_csv=None, year_filter_value=None):
-    """Process all images in a folder and combine results into single CSV"""
-    import glob
-    import os
+    # Extract rows
+    print(f"\nProcessing: {input_image.name}")
+    print("-" * logging.CONSOLE_WIDTH)
+
+    try:
+        rows = extract_rows(input_image)
+        filtered_rows = filter_rows_by_year(rows, year_filter_value)
+
+        cr_tables = sorted({row.get('cr_table', '') for row in rows if row.get('cr_table', '')})
+        cr_text = ', '.join(cr_tables) if cr_tables else '-'
+
+        print(f"  C/R Table: {cr_text}")
+        print(f"  Extracted: {len(rows)} rows")
+        print(f"  Filtered:  {len(filtered_rows)} rows")
+
+    except FileNotFoundError:
+        print(f"  Error: Image not found: {input_image}")
+        return
+    except Exception as e:
+        print(f"  Error processing {input_image.name}: {e}")
+        return
+
+    # Determine output paths
+    if output_csv is None:
+        suffix = 'all_years' if year_filter_value is None else year_filter_value
+        output_csv = Path(f'terminal_ocr_output_{suffix}.csv')
+    else:
+        output_csv = Path(output_csv)
+
+    xlsx_out = Path(output_xlsx) if output_xlsx else None
+
+    # Write output
+    write_csv(filtered_rows, output_csv)
+    print(f"\n  CSV output: {output_csv}")
+
+    if xlsx_out:
+        write_xlsx(filtered_rows, xlsx_out)
+        print(f"  Excel output: {xlsx_out}")
+
+    # Summary
+    print("\n" + "=" * logging.CONSOLE_WIDTH)
+    print("EXTRACTION COMPLETE!")
+    print("=" * logging.CONSOLE_WIDTH)
+
+    elapsed = time.time() - start_time
+    year_label = 'all years' if year_filter_value is None else year_filter_value
+    print(f"\nExtracted {len(rows)} rows from 1 image.")
+    print(f"Exported {len(filtered_rows)} row(s) for {year_label} -> {output_csv}")
+
+    if logging.SHOW_TIMING:
+        print(f"Processing time: {elapsed:.2f} seconds")
+
+    return elapsed, len(filtered_rows)
+
+
+def batch_process_images(
+    input_folder=None,
+    output_csv=None,
+    output_xlsx=None,
+    year_filter_value=None,
+    recursive=False,
+    no_debug=False,
+):
+    """Process all images in a folder and combine results into single CSV."""
     import time
-    
-    # Disable verbose mode for batch processing
-    original_verbose = logging.VERBOSE_MODE if hasattr(logging, 'VERBOSE_MODE') else True
-    if hasattr(logging, 'VERBOSE_MODE'):
-        logging.VERBOSE_MODE = False
-    
+    start_time = time.time()
+
     print("=" * logging.CONSOLE_WIDTH)
     print(" " * 15 + "BATCH OCR PROCESSING")
     print("=" * logging.CONSOLE_WIDTH)
-    
-    # Use defaults from settings if not provided
-    if image_folder is None:
-        image_folder = paths.DEFAULT_INPUT_FOLDER
-        print(f"\nUsing default input folder: {image_folder}")
-    
-    if output_csv is None:
-        output_csv = paths.DEFAULT_BATCH_OUTPUT
-        print(f"Using default output file: {output_csv}")
-    
+
+    # Resolve input folder
+    if input_folder is None:
+        input_folder = Path(getattr(paths, 'DEFAULT_INPUT_FOLDER', 'frames_masked'))
+    else:
+        input_folder = Path(input_folder)
+
     if year_filter_value:
         print(f"\n*** YEAR FILTER: Only extracting data from year {year_filter_value} ***\n")
-    
-    # Find all PNG images in folder
-    image_pattern = os.path.join(image_folder, '*.png')
-    image_files = sorted(glob.glob(image_pattern))
-    
-    if not image_files:
-        print(f"✗ No PNG images found in: {image_folder}")
+
+    # Collect images
+    try:
+        image_files = collect_images_from_folder(input_folder, recursive=recursive)
+    except (FileNotFoundError, NotADirectoryError) as e:
+        print(f"Error: {e}")
         return
-    
-    print(f"Found {len(image_files)} images to process:\n")
+
+    if not image_files:
+        print(f"No images found in: {input_folder}")
+        return
+
+    print(f"\nFound {len(image_files)} images to process:")
     for img in image_files:
-        print(f"  - {os.path.basename(img)}")
-    
-    print("\n" + "=" * 70)
-    
-    # Collect all data rows (skip headers from each file)
-    all_rows = []
-    header_written = False
-    
-    # Track statistics for each image
-    processing_stats = []
-    
+        print(f"  - {img.name}")
+
+    print("\n" + "-" * logging.CONSOLE_WIDTH)
+
+    # Process each image
+    all_rows: list[dict[str, str]] = []
+    per_file_stats: list[dict[str, object]] = []
+
     for idx, image_path in enumerate(image_files, 1):
-        image_name = os.path.basename(image_path)
-        print(f"\n[{idx}/{len(image_files)}] Processing: {image_name}")
-        print("-" * 70)
-        
-        # Start timing for this image
+        print(f"\n[{idx}/{len(image_files)}] Processing: {image_path.name}")
+        print("-" * logging.CONSOLE_WIDTH)
+
         img_start_time = time.time()
-        
+
         try:
-            # Create temporary output path
-            temp_csv = f'temp_extract_{idx}.csv'
-            
-            # Extract table from this image
-            input_image = image_path
-            preprocessed = f'temp_preprocessed_{idx}.png'
-            csv_output = temp_csv
-            excel_generator = 'create_excel.py'
-            
-            # Run extraction (simplified inline version)
-            ocr_image = preprocess_image(input_image, preprocessed)
-            table_number = extract_table_number(input_image)
-            print(f"     C/R Table: {table_number}")
-            
-            tsv_data = ocr_extract(ocr_image)
-            if not tsv_data:
-                print(f"     ✗ OCR failed for {image_name}")
-                img_elapsed = time.time() - img_start_time
-                processing_stats.append({
-                    'image': image_name,
-                    'rows': 0,
-                    'time': img_elapsed,
-                    'status': 'FAILED'
-                })
-                continue
-            
-            words = parse_ocr_output(tsv_data)
-            rows = group_into_rows(words)
-            
-            # Check if small table - use template extraction
-            if should_use_template_extraction(words, rows):
-                template_rows, template_table_number = extract_with_template(image_path, year_filter_value)
-                if template_rows:
-                    # Build table with template results
-                    table = [['C/R Table', 'Date', 'Doc No.', 'Orig Amount', 'Acc Amount']]
-                    table.extend(template_rows)
-                    table_number = template_table_number
-                else:
-                    # Template failed, try normal extraction
-                    columns = smart_column_detection(rows)
-                    table = build_table(rows, columns)
-                    table = clean_data(table)
-                    table = remove_empty_columns(table)
-                    header_idx = find_header_row(table)
-                    if header_idx > 0:
-                        table = table[header_idx:]
-                    if table:
-                        table[0].insert(0, 'C/R Table')
-                        for row_idx in range(1, len(table)):
-                            table[row_idx].insert(0, table_number)
-                    table = fill_missing_data(table)
-                    table = remove_empty_rows(table)
-                    table = cleanup_table_header_and_rows(table, table_number, year_filter_value)
-            else:
-                # Normal column-based extraction
-                columns = smart_column_detection(rows)
-                table = build_table(rows, columns)
-                table = clean_data(table)
-                table = remove_empty_columns(table)
-                
-                header_idx = find_header_row(table)
-                if header_idx > 0:
-                    table = table[header_idx:]
-                
-                if table:
-                    table[0].insert(0, 'C/R Table')
-                    for row_idx in range(1, len(table)):
-                        table[row_idx].insert(0, table_number)
-                
-                table = fill_missing_data(table)
-                table = remove_empty_rows(table)
-                table = cleanup_table_header_and_rows(table, table_number, year_filter_value)
-                
-                # Fallback: If normal extraction yielded very few rows, try template
-                if len(table) <= 1:  # Only header or empty
-                    template_rows, template_table_number = extract_with_template(image_path, year_filter_value)
-                    if template_rows and len(template_rows) > 0:
-                        table_number = template_table_number
-                        table = [['C/R Table', 'Date', 'Doc No.', 'Orig Amount', 'Acc Amount']]
-                        table.extend(template_rows)
-            
-            # Add rows to combined list (skip header after first file)
-            if not header_written:
-                all_rows.extend(table)  # Include header from first file
-                header_written = True
-            else:
-                all_rows.extend(table[1:])  # Skip header from subsequent files
-            
-            # Calculate elapsed time for this image
-            img_elapsed = time.time() - img_start_time
-            row_count = len(table) - 1  # Exclude header
-            
-            print(f"     ✓ Extracted {row_count} rows in {img_elapsed:.2f}s")
-            
-            # Store stats
-            processing_stats.append({
-                'image': image_name,
-                'rows': row_count,
-                'time': img_elapsed,
-                'status': 'OK'
+            rows = extract_rows(image_path)
+            filtered_rows = filter_rows_by_year(rows, year_filter_value)
+            all_rows.extend(rows)
+
+            cr_tables = sorted({row.get('cr_table', '') for row in rows if row.get('cr_table', '')})
+            cr_text = ', '.join(cr_tables) if cr_tables else '-'
+
+            print(f"  C/R Table: {cr_text}")
+            print(f"  Extracted: {len(rows)} rows")
+            print(f"  Filtered:  {len(filtered_rows)} rows")
+
+            per_file_stats.append({
+                'image': image_path,
+                'extracted': len(rows),
+                'filtered': len(filtered_rows),
+                'cr_tables': cr_tables,
             })
-            
-            # Cleanup temp files
-            try:
-                if os.path.exists(preprocessed):
-                    os.remove(preprocessed)
-                if os.path.exists(temp_csv):
-                    os.remove(temp_csv)
-            except:
-                pass
-            
+
         except Exception as e:
-            img_elapsed = time.time() - img_start_time
-            print(f"     ✗ Error processing {image_name}: {e}")
-            processing_stats.append({
-                'image': image_name,
-                'rows': 0,
-                'time': img_elapsed,
-                'status': 'ERROR'
+            print(f"  Error processing {image_path.name}: {e}")
+            per_file_stats.append({
+                'image': image_path,
+                'extracted': 0,
+                'filtered': 0,
+                'cr_tables': [],
             })
-            continue
-    
-    # Save combined results
-    if all_rows:
-        save_csv(all_rows, output_csv)
-        
-        print("\n" + "=" * 70)
-        print("BATCH PROCESSING COMPLETE!")
-        print("=" * 70)
-        print(f"\nCombined results saved to: {output_csv}")
-        print(f"Total rows extracted: {len(all_rows)-1} (excluding header)")
-        print(f"Total images processed: {len(image_files)}")
-        
-        # Processing summary table
-        if processing_stats:
-            print("\n" + "=" * 70)
-            print("PROCESSING SUMMARY:")
-            print("=" * 70)
-            
-            # Filter stats - only show images with rows > 0
-            successful_stats = [s for s in processing_stats if s['rows'] > 0]
-            failed_stats = [s for s in processing_stats if s['rows'] == 0]
-            
-            if successful_stats:
-                # Table header
-                print(f"\n{'Image Name':<35} {'Rows':>8} {'Time (s)':>10} {'Status':>10}")
-                print("-" * 70)
-                
-                # Table rows (only successful extractions)
-                total_rows = 0
-                total_success_time = 0.0
-                
-                for stat in successful_stats:
-                    print(f"{stat['image']:<35} {stat['rows']:>8} {stat['time']:>10.2f} {'✓':>10}")
-                    total_rows += stat['rows']
-                    total_success_time += stat['time']
-                
-                # Calculate totals for ALL images (including failures)
-                total_time_all = sum(s['time'] for s in processing_stats)
-                total_images = len(processing_stats)
-                avg_time_all = total_time_all / total_images if total_images > 0 else 0
-                avg_rows = total_rows / len(successful_stats) if successful_stats else 0
-                
-                # Summary statistics
-                print("-" * 70)
-                print(f"{'TOTAL:':<35} {total_rows:>8} {total_time_all:>10.2f}")
-                print(f"{'AVERAGE:':<35} {avg_rows:>8.1f} {avg_time_all:>10.2f}")
-            
-            # Show summary line
-            success_count = len(successful_stats)
-            total_count = len(processing_stats)
-            print(f"\nSuccess: {success_count}/{total_count} images ({100*success_count/total_count:.1f}%)")
-            
-            # Show failed images if any (brief summary)
-            if failed_stats:
-                failed_time = sum(s['time'] for s in failed_stats)
-                print(f"Failed: {len(failed_stats)} images (0 rows extracted, {failed_time:.2f}s wasted)")
-                if len(failed_stats) <= 5:
-                    # Show names if only a few failures
-                    for stat in failed_stats:
-                        print(f"  ✗ {stat['image']} ({stat['time']:.2f}s)")
-                else:
-                    # Just count if many failures
-                    print(f"  (See processing log above for details)")
-        
-        # Show preview
-        print("\n" + "=" * 70)
-        print("DATA PREVIEW:")
-        print("=" * 70)
-        for idx, row in enumerate(all_rows[:10], 1):
-            row_str = ' │ '.join(f"{str(cell):15s}" for cell in row[:6])
-            print(f"{idx:2d}. {row_str}")
-        
-        if len(all_rows) > 10:
-            print(f"... ({len(all_rows) - 10} more rows)")
+
+    # Filter all rows by year
+    filtered_all_rows = filter_rows_by_year(all_rows, year_filter_value)
+
+    # Determine output paths
+    if output_csv is None:
+        suffix = 'all_years' if year_filter_value is None else year_filter_value
+        output_csv = Path(f'terminal_ocr_output_{suffix}.csv')
     else:
-        print("\n✗ No data extracted from any images")
-    
-    # Restore verbose mode
-    if hasattr(logging, 'VERBOSE_MODE'):
-        logging.VERBOSE_MODE = original_verbose
+        output_csv = Path(output_csv)
 
-if __name__ == "__main__":
-    import sys
-    
-    # Parse command line arguments
-    if '--help' in sys.argv or '-h' in sys.argv:
-        print(f"""
-OCR Table Extraction Tool - Version 4.3
+    xlsx_out = Path(output_xlsx) if output_xlsx else None
 
-USAGE:
+    # Write output
+    write_csv(filtered_all_rows, output_csv)
+    if xlsx_out:
+        write_xlsx(filtered_all_rows, xlsx_out)
 
-1. Single Image:
-   python extract.py image.png
-   python extract.py image.png --year 2020
+    # Print debug summary
+    if not no_debug:
+        print_debug_summary(per_file_stats, year_filter_value, output_csv, xlsx_out)
 
-2. Batch Processing:
-   python extract.py --batch folder_path output.csv
-   python extract.py --batch folder_path output.csv --year 2020
-   
-3. Batch with Defaults (uses settings.py):
-   python extract.py --batch
-   python extract.py --batch --year 2020
-   python extract.py --batch output.csv --year 2020
+    # Summary
+    elapsed = time.time() - start_time
+    year_label = 'all years' if year_filter_value is None else year_filter_value
 
-OPTIONS:
-   --year YYYY    Filter results to only include specified year
-   --batch        Process all PNG images in a folder
-   --help, -h     Show this help message
+    print(f"\nExtracted {len(all_rows)} rows from {len(image_files)} image(s).")
+    print(f"Exported {len(filtered_all_rows)} row(s) for {year_label} -> {output_csv}")
+    if xlsx_out:
+        print(f"Excel export -> {xlsx_out}")
 
-DEFAULT SETTINGS (configured in settings.py):
-   Input folder:  {paths.DEFAULT_INPUT_FOLDER}
-   Output file:   {paths.DEFAULT_BATCH_OUTPUT}
-   Input image:   {paths.DEFAULT_INPUT_IMAGE}
+    if logging.SHOW_TIMING:
+        print(f"Processing time: {elapsed:.2f} seconds")
 
+
+# ============================================================================
+# CLI ENTRY POINT
+# ============================================================================
+
+def _parse_cli_args():
+    """Parse command line arguments."""
+    import argparse
+
+    ap = argparse.ArgumentParser(
+        description='Extract terminal table rows from screenshots and export to CSV/Excel.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
 EXAMPLES:
 
-   # Single image
-   python extract.py frame_0004.png
+  # Single image extraction
+  python extract.py image.png
+  python extract.py image.png --year 2025
 
-   # Single image with year filter
-   python extract.py frame_0004.png --year 2020
+  # Batch processing with folder
+  python extract.py --batch ./images
+  python extract.py --batch ./images --year 2025
 
-   # Batch process with explicit paths
-   python extract.py --batch ./images combined_output.csv
+  # Batch with explicit output
+  python extract.py --batch ./images combined_output.csv
 
-   # Batch process with defaults from settings.py
-   python extract.py --batch
+  # Use defaults from settings.py
+  python extract.py --batch
 
-   # Batch process with year filter (using defaults)
-   python extract.py --batch --year 2020
+  # Export to Excel
+  python extract.py image.png --xlsx output.xlsx
 
-   # Batch with custom output but default input folder
-   python extract.py --batch my_output.csv --year 2020
-        """)
-        sys.exit(0)
-    
-    # Check for batch mode
-    if '--batch' in sys.argv:
-        batch_idx = sys.argv.index('--batch')
-        
-        # Check if folder path is provided
-        folder_path = None
-        output_file = None
-        
-        # Try to get folder and output from arguments
-        if len(sys.argv) > batch_idx + 1:
-            next_arg = sys.argv[batch_idx + 1]
-            # If next arg is not another flag, it's the folder path
-            if not next_arg.startswith('--'):
-                folder_path = next_arg
-                # Try to get output file
-                if len(sys.argv) > batch_idx + 2:
-                    potential_output = sys.argv[batch_idx + 2]
-                    if not potential_output.startswith('--'):
-                        output_file = potential_output
-        
-        # Use defaults from settings if not provided
-        if folder_path is None:
-            print(f"No folder specified, using default from settings: {paths.DEFAULT_INPUT_FOLDER}")
-        
-        if output_file is None:
-            print(f"No output file specified, using default from settings: {paths.DEFAULT_BATCH_OUTPUT}")
-        
-        # Check for year filter
-        year_filter_value = None
-        if '--year' in sys.argv:
-            year_idx = sys.argv.index('--year')
-            if len(sys.argv) > year_idx + 1:
-                year_filter_value = sys.argv[year_idx + 1]
-        
-        batch_process_images(folder_path, output_file, year_filter_value)
-    
+  # Disable debug summary
+  python extract.py --batch --no-debug
+        """
+    )
+
+    ap.add_argument('images', nargs='*', type=Path, help='Screenshot image paths')
+    ap.add_argument('--batch', action='store_true', help='Batch process all images in folder')
+    ap.add_argument('--folder', '--foldername', type=Path, default=None,
+                    help='Folder containing screenshot images to process')
+    ap.add_argument('--recursive', action='store_true',
+                    help='When used with --batch, scan subfolders recursively')
+    ap.add_argument('--year', type=str,
+                    help='4-digit transaction year to export. Use ALL to export every year.')
+    ap.add_argument('--csv', type=Path, default=None, help='CSV output path')
+    ap.add_argument('--xlsx', type=Path, default=None, help='Optional Excel .xlsx output path')
+    ap.add_argument('--no-prompt', action='store_true',
+                    help='Do not ask for year; export all years unless --year is supplied')
+    ap.add_argument('--no-debug', action='store_true',
+                    help='Turn off per-file terminal debug summary')
+    ap.add_argument('--debug', action='store_true',
+                    help='Force per-file terminal debug summary on')
+    ap.add_argument('--no-preprocess', action='store_true',
+                    help='Disable image preprocessing (kept for backward compatibility)')
+    ap.add_argument('--grayscale-only', action='store_true',
+                    help='Disable binarization, keep grayscale (kept for backward compatibility)')
+    ap.add_argument('--help-legacy', action='store_true',
+                    help='Show legacy help message')
+
+    return ap.parse_args()
+
+
+if __name__ == "__main__":
+    args = _parse_cli_args()
+
+    # Handle year filter
+    selected_year = None
+    if args.year:
+        if args.year.lower() in {'all', 'a', '*'}:
+            selected_year = None
+        elif YEAR_RE.fullmatch(args.year):
+            selected_year = args.year
+        else:
+            print(f"Invalid --year value: {args.year!r}. Use a 4-digit year or ALL.")
+            sys.exit(1)
+    elif args.no_prompt:
+        selected_year = None
+
+    # Determine debug mode
+    no_debug = args.no_debug and not args.debug
+
+    if args.batch or args.folder:
+        # Batch mode
+        batch_process_images(
+            input_folder=args.folder,
+            output_csv=args.csv,
+            output_xlsx=args.xlsx,
+            year_filter_value=selected_year,
+            recursive=args.recursive,
+            no_debug=no_debug,
+        )
     else:
         # Single image mode
-        year_filter = None
-        if '--year' in sys.argv:
-            year_idx = sys.argv.index('--year')
-            if len(sys.argv) > year_idx + 1:
-                year_filter = sys.argv[year_idx + 1]
-        
-        # Get image path
-        image_path = None
-        for arg in sys.argv[1:]:
-            if not arg.startswith('--') and arg not in [year_filter]:
-                image_path = arg
-                break
-        
-        if image_path:
-            print(f"Using custom image: {image_path}")
-            main(image_path, year_filter)
-        else:
-            main(None, year_filter)
+        image_path = args.images[0] if args.images else None
+        main(
+            input_image=image_path,
+            year_filter_value=selected_year,
+            output_csv=args.csv,
+            output_xlsx=args.xlsx,
+            no_debug=no_debug,
+        )

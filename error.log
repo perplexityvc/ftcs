@@ -1,0 +1,13 @@
+[15:28:46] [INFO] ============================================================
+Starting OCR extraction on captured screenshots...
+Command: C:\Users\shahrulfikri.yunus\Downloads\ftcs-main\ftcs\Scripts\python.exe C:\Users\shahrulfikri.yunus\Downloads\ftcs-main\ftcs-main\extract.py --batch C:\Users\shahrulfikri.yunus\Downloads\ftcs-main\ftcs-main\captured_screens C:\Users\shahrulfikri.yunus\Downloads\ftcs-main\ftcs-main\captured_screens\combined_output.csv
+OCR extraction failed with exit code 1
+Extractor error output:
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\shahrulfikri.yunus\Downloads\ftcs-main\ftcs-main\extract.py", line 1214, in batch_process_images
+    print(f"     \u2717 Error processing {image_name}: {e}")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\shahrulfikri.yunus\AppData\Local\Programs\Python\Python313\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\u2717' in position 5: character maps to <undefined>
