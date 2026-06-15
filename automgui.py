@@ -1091,7 +1091,7 @@ class AutomationGUI:
             return
 
         output_csv = os.path.join(capture_dir, 'combined_output.csv')
-        cmd = [sys.executable, extract_script, '--batch', capture_dir, output_csv]
+        cmd = [sys.executable, extract_script, '--batch', '--folder', capture_dir, '--csv', output_csv]
         if not getattr(Config, 'ENABLE_IMAGE_PREPROCESSING', True):
             cmd.append('--no-preprocess')
         else:
