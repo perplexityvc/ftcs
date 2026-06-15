@@ -129,7 +129,7 @@ except ImportError:
 # ============================================================================
 
 DATE_RE = re.compile(r"\b\d{2}/\d{2}/\d{4}\b")
-CR_RE = re.compile(r"C/R\s+Table\s+([A-Z0-9]+)")
+CR_RE = re.compile(r"C/R\s+Table\s+[^\w]*([A-Z0-9]+)")
 DOC_RE = re.compile(r"\b[A-Z]\d{3}\b")
 YEAR_RE = re.compile(r"^(19|20)\d{2}$")
 
@@ -353,12 +353,41 @@ def ocr_text(path: Path) -> str:
 # ============================================================================
 
 def normalize_cr_table(raw: str) -> str:
-    """Normalize common OCR confusion in C/R table codes."""
+    """Normalize common OCR confusion in C/R table codes.
+    
+    Examples:
+      CI01 -> CI01 (already correct)
+      CIO1 -> CI01 (O misread as 0)
+      CIOQ1 -> CI01 (O misread, Q is OCR noise)
+      MCO1 -> MC01 (O misread as 0)
+    """
     s = raw.strip().upper()
-    if len(s) == 4:
+    
+    # Expected format: 2 letters + 2 digits (e.g., CI01)
+    # Handle OCR noise that adds extra characters
+    
+    if len(s) >= 4:
+        # Extract first 2 characters as prefix (should be letters)
         prefix = s[:2]
-        suffix = s[2:].replace('O', '0').replace('I', '1').replace('L', '1')
-        return prefix + suffix
+        
+        # Get the remaining part and normalize
+        suffix = s[2:]
+        
+        # Apply OCR normalization to suffix
+        # O->0, I->1, L->1 for digit confusion
+        normalized = suffix.replace('O', '0').replace('I', '1').replace('L', '1')
+        
+        # Remove any non-digit characters (OCR noise like Q, etc.)
+        digits_only = ''.join(c for c in normalized if c.isdigit())
+        
+        # Take first 2 digits if available
+        if len(digits_only) >= 2:
+            return prefix + digits_only[:2]
+        elif len(digits_only) == 1:
+            return prefix + digits_only
+        else:
+            return prefix
+    
     return s
 
 
