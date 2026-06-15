@@ -628,6 +628,7 @@ def main(
     output_csv=None,
     output_xlsx=None,
     no_debug=False,
+    no_preview=False,
 ):
     """Main extraction function for single image."""
     import time
@@ -662,10 +663,9 @@ def main(
         print(f"  Filtered:  {len(filtered_rows)} rows")
 
         # Save masked preview with bounding boxes
-        skip_preview = getattr(args, 'no_preview', False) if 'args' in dir() else not getattr(preprocessing, 'SAVE_MASKED_PREVIEW', True)
-        if not skip_preview:
-            show_bboxes = not getattr(args, 'no_preview_bboxes', False) if 'args' in dir() else getattr(preprocessing, 'MASKED_PREVIEW_SHOW_BBOXES', True)
-            use_grayscale = getattr(args, 'preview_grayscale', False) if 'args' in dir() else getattr(preprocessing, 'MASKED_PREVIEW_GRAYSCALE', False)
+        if not no_preview:
+            show_bboxes = getattr(preprocessing, 'MASKED_PREVIEW_SHOW_BBOXES', True)
+            use_grayscale = getattr(preprocessing, 'MASKED_PREVIEW_GRAYSCALE', False)
             preview_path = save_masked_preview(str(input_image), show_bboxes=show_bboxes, grayscale=use_grayscale)
             if preview_path:
                 print(f"  Preview:   {preview_path}")
@@ -717,6 +717,7 @@ def batch_process_images(
     year_filter_value=None,
     recursive=False,
     no_debug=False,
+    no_preview=False,
 ):
     """Process all images in a folder and combine results into single CSV."""
     import time
@@ -786,10 +787,9 @@ def batch_process_images(
             print(f"  Filtered:  {len(filtered_rows)} rows")
 
             # Save masked preview with bounding boxes
-            skip_preview = getattr(args, 'no_preview', False) if 'args' in dir() else not getattr(preprocessing, 'SAVE_MASKED_PREVIEW', True)
-            if not skip_preview:
-                show_bboxes = not getattr(args, 'no_preview_bboxes', False) if 'args' in dir() else getattr(preprocessing, 'MASKED_PREVIEW_SHOW_BBOXES', True)
-                use_grayscale = getattr(args, 'preview_grayscale', False) if 'args' in dir() else getattr(preprocessing, 'MASKED_PREVIEW_GRAYSCALE', False)
+            if not no_preview:
+                show_bboxes = getattr(preprocessing, 'MASKED_PREVIEW_SHOW_BBOXES', True)
+                use_grayscale = getattr(preprocessing, 'MASKED_PREVIEW_GRAYSCALE', False)
                 preview_path = save_masked_preview(str(image_path), show_bboxes=show_bboxes, grayscale=use_grayscale)
                 if preview_path:
                     print(f"  Preview:   {preview_path}")
@@ -944,6 +944,7 @@ if __name__ == "__main__":
             year_filter_value=selected_year,
             recursive=args.recursive,
             no_debug=no_debug,
+            no_preview=args.no_preview,
         )
     else:
         # Single image mode
@@ -954,4 +955,5 @@ if __name__ == "__main__":
             output_csv=args.csv,
             output_xlsx=args.xlsx,
             no_debug=no_debug,
+            no_preview=args.no_preview,
         )
