@@ -57,6 +57,7 @@ class Config:
     ENABLE_POST_PROCESSING = True
     ENABLE_IMAGE_PREPROCESSING = True
     ENABLE_BINARIZATION = True
+    ENABLE_MASKING = True
     MASKED_PREVIEW_GRAYSCALE = False
     MASKED_PREVIEW_SHOW_BBOXES = True
     DISABLE_PROCESSING = False
@@ -102,6 +103,7 @@ class Config:
             'enable_post_processing': cls.ENABLE_POST_PROCESSING,
             'enable_image_preprocessing': cls.ENABLE_IMAGE_PREPROCESSING,
             'enable_binarization': cls.ENABLE_BINARIZATION,
+            'enable_masking': cls.ENABLE_MASKING,
             'masked_preview_grayscale': cls.MASKED_PREVIEW_GRAYSCALE,
             'masked_preview_show_bboxes': cls.MASKED_PREVIEW_SHOW_BBOXES,
             'disable_processing': cls.DISABLE_PROCESSING,
@@ -667,6 +669,7 @@ class AutomationGUI:
         self.post_processing_enabled_var = tk.BooleanVar(value=Config.ENABLE_POST_PROCESSING)
         self.image_preprocessing_enabled_var = tk.BooleanVar(value=Config.ENABLE_IMAGE_PREPROCESSING)
         self.binarization_enabled_var = tk.BooleanVar(value=Config.ENABLE_BINARIZATION)
+        self.masking_enabled_var = tk.BooleanVar(value=Config.ENABLE_MASKING)
         self.masked_preview_grayscale_var = tk.BooleanVar(value=Config.MASKED_PREVIEW_GRAYSCALE)
         self.masked_preview_show_bboxes_var = tk.BooleanVar(value=Config.MASKED_PREVIEW_SHOW_BBOXES)
         self.disable_processing_var = tk.BooleanVar(value=Config.DISABLE_PROCESSING)
@@ -717,18 +720,24 @@ class AutomationGUI:
 
         ttk.Checkbutton(
             features_frame,
+            text="Enable masking for OCR (disable to see full header)",
+            variable=self.masking_enabled_var,
+        ).grid(row=7, column=0, sticky=tk.W, pady=4)
+
+        ttk.Checkbutton(
+            features_frame,
             text="Save masked preview as grayscale (default: color)",
             variable=self.masked_preview_grayscale_var,
-        ).grid(row=7, column=0, sticky=tk.W, pady=4)
+        ).grid(row=8, column=0, sticky=tk.W, pady=4)
 
         ttk.Checkbutton(
             features_frame,
             text="Draw OCR bounding boxes and confidence on masked preview",
             variable=self.masked_preview_show_bboxes_var,
-        ).grid(row=8, column=0, sticky=tk.W, pady=4)
+        ).grid(row=9, column=0, sticky=tk.W, pady=4)
 
         mask_frame = ttk.Frame(features_frame)
-        mask_frame.grid(row=9, column=0, sticky=tk.W, pady=6)
+        mask_frame.grid(row=10, column=0, sticky=tk.W, pady=6)
         ttk.Label(mask_frame, text="Mask top %:").grid(row=0, column=0, sticky=tk.W)
         ttk.Spinbox(
             mask_frame,
@@ -954,6 +963,7 @@ class AutomationGUI:
         Config.ENABLE_POST_PROCESSING = self.post_processing_enabled_var.get()
         Config.ENABLE_IMAGE_PREPROCESSING = self.image_preprocessing_enabled_var.get()
         Config.ENABLE_BINARIZATION = self.binarization_enabled_var.get()
+        Config.ENABLE_MASKING = self.masking_enabled_var.get()
         Config.MASKED_PREVIEW_GRAYSCALE = self.masked_preview_grayscale_var.get()
         Config.MASKED_PREVIEW_SHOW_BBOXES = self.masked_preview_show_bboxes_var.get()
         Config.DISABLE_PROCESSING = self.disable_processing_var.get()
@@ -978,6 +988,7 @@ class AutomationGUI:
         self.post_processing_enabled_var.set(Config.ENABLE_POST_PROCESSING)
         self.image_preprocessing_enabled_var.set(Config.ENABLE_IMAGE_PREPROCESSING)
         self.binarization_enabled_var.set(Config.ENABLE_BINARIZATION)
+        self.masking_enabled_var.set(Config.ENABLE_MASKING)
         self.masked_preview_grayscale_var.set(Config.MASKED_PREVIEW_GRAYSCALE)
         self.masked_preview_show_bboxes_var.set(Config.MASKED_PREVIEW_SHOW_BBOXES)
         self.disable_processing_var.set(Config.DISABLE_PROCESSING)
@@ -1019,6 +1030,7 @@ class AutomationGUI:
             Config.ENABLE_POST_PROCESSING = True
             Config.ENABLE_IMAGE_PREPROCESSING = True
             Config.ENABLE_BINARIZATION = True
+            Config.ENABLE_MASKING = True
             Config.MASKED_PREVIEW_GRAYSCALE = False
             Config.MASKED_PREVIEW_SHOW_BBOXES = True
             Config.DISABLE_PROCESSING = False
@@ -1111,8 +1123,14 @@ class AutomationGUI:
             if not getattr(Config, 'ENABLE_BINARIZATION', True):
                 cmd.append('--grayscale-only')
 
-            mask_top = max(0.0, min(100.0, float(getattr(Config, 'MASK_TOP_PERCENT', 33.0))))
-            mask_bottom = max(0.0, min(100.0, float(getattr(Config, 'MASK_BOTTOM_PERCENT', 15.0))))
+            # Check if masking is enabled
+            if getattr(Config, 'ENABLE_MASKING', True):
+                mask_top = max(0.0, min(100.0, float(getattr(Config, 'MASK_TOP_PERCENT', 33.0))))
+                mask_bottom = max(0.0, min(100.0, float(getattr(Config, 'MASK_BOTTOM_PERCENT', 15.0))))
+            else:
+                # Masking disabled - pass 0 to skip masking
+                mask_top = 0.0
+                mask_bottom = 0.0
             cmd.extend(['--mask-top', f'{mask_top:.2f}', '--mask-bottom', f'{mask_bottom:.2f}'])
 
         if getattr(Config, 'MASKED_PREVIEW_GRAYSCALE', False):
