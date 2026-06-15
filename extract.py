@@ -465,8 +465,21 @@ def collect_images_from_folder(folder: Path, recursive: bool = False) -> list[Pa
 def extract_rows(path: Path) -> list[dict[str, str]]:
     """Extract table rows from an image."""
     text = ocr_text(path)
+    
+    # Debug: Print OCR text and regex match
+    print(f"  [DEBUG] First 200 chars of OCR text: {text[:200]}")
     cr_match = CR_RE.search(text)
+    if cr_match:
+        print(f"  [DEBUG] CR_RE captured: [{cr_match.group(1)}]")
+    else:
+        print(f"  [DEBUG] CR_RE: No match found")
+        # Try to find C/R Table line manually
+        for line in text.split('\n'):
+            if 'C/R' in line or 'Table' in line:
+                print(f"  [DEBUG] Line with C/R or Table: [{line}]")
+    
     cr = normalize_cr_table(cr_match.group(1)) if cr_match else ''
+    print(f"  [DEBUG] Final cr_table value: [{cr}]")
 
     rows: list[dict[str, str]] = []
     for row_no, line in enumerate([ln for ln in text.splitlines() if DATE_RE.search(ln)], 1):
