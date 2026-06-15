@@ -58,6 +58,7 @@ class Config:
     ENABLE_IMAGE_PREPROCESSING = True
     ENABLE_BINARIZATION = True
     ENABLE_MASKING = True
+    SAVE_MASKED_PREVIEW = True
     MASKED_PREVIEW_GRAYSCALE = False
     MASKED_PREVIEW_SHOW_BBOXES = True
     DISABLE_PROCESSING = False
@@ -104,6 +105,7 @@ class Config:
             'enable_image_preprocessing': cls.ENABLE_IMAGE_PREPROCESSING,
             'enable_binarization': cls.ENABLE_BINARIZATION,
             'enable_masking': cls.ENABLE_MASKING,
+            'save_masked_preview': cls.SAVE_MASKED_PREVIEW,
             'masked_preview_grayscale': cls.MASKED_PREVIEW_GRAYSCALE,
             'masked_preview_show_bboxes': cls.MASKED_PREVIEW_SHOW_BBOXES,
             'disable_processing': cls.DISABLE_PROCESSING,
@@ -670,6 +672,7 @@ class AutomationGUI:
         self.image_preprocessing_enabled_var = tk.BooleanVar(value=Config.ENABLE_IMAGE_PREPROCESSING)
         self.binarization_enabled_var = tk.BooleanVar(value=Config.ENABLE_BINARIZATION)
         self.masking_enabled_var = tk.BooleanVar(value=Config.ENABLE_MASKING)
+        self.save_masked_preview_var = tk.BooleanVar(value=Config.SAVE_MASKED_PREVIEW)
         self.masked_preview_grayscale_var = tk.BooleanVar(value=Config.MASKED_PREVIEW_GRAYSCALE)
         self.masked_preview_show_bboxes_var = tk.BooleanVar(value=Config.MASKED_PREVIEW_SHOW_BBOXES)
         self.disable_processing_var = tk.BooleanVar(value=Config.DISABLE_PROCESSING)
@@ -726,18 +729,24 @@ class AutomationGUI:
 
         ttk.Checkbutton(
             features_frame,
+            text="Save masked preview images to masked_inspection folder",
+            variable=self.save_masked_preview_var,
+        ).grid(row=8, column=0, sticky=tk.W, pady=4)
+
+        ttk.Checkbutton(
+            features_frame,
             text="Save masked preview as grayscale (default: color)",
             variable=self.masked_preview_grayscale_var,
-        ).grid(row=8, column=0, sticky=tk.W, pady=4)
+        ).grid(row=9, column=0, sticky=tk.W, pady=4)
 
         ttk.Checkbutton(
             features_frame,
             text="Draw OCR bounding boxes and confidence on masked preview",
             variable=self.masked_preview_show_bboxes_var,
-        ).grid(row=9, column=0, sticky=tk.W, pady=4)
+        ).grid(row=10, column=0, sticky=tk.W, pady=4)
 
         mask_frame = ttk.Frame(features_frame)
-        mask_frame.grid(row=10, column=0, sticky=tk.W, pady=6)
+        mask_frame.grid(row=11, column=0, sticky=tk.W, pady=6)
         ttk.Label(mask_frame, text="Mask top %:").grid(row=0, column=0, sticky=tk.W)
         ttk.Spinbox(
             mask_frame,
@@ -964,6 +973,7 @@ class AutomationGUI:
         Config.ENABLE_IMAGE_PREPROCESSING = self.image_preprocessing_enabled_var.get()
         Config.ENABLE_BINARIZATION = self.binarization_enabled_var.get()
         Config.ENABLE_MASKING = self.masking_enabled_var.get()
+        Config.SAVE_MASKED_PREVIEW = self.save_masked_preview_var.get()
         Config.MASKED_PREVIEW_GRAYSCALE = self.masked_preview_grayscale_var.get()
         Config.MASKED_PREVIEW_SHOW_BBOXES = self.masked_preview_show_bboxes_var.get()
         Config.DISABLE_PROCESSING = self.disable_processing_var.get()
@@ -989,6 +999,7 @@ class AutomationGUI:
         self.image_preprocessing_enabled_var.set(Config.ENABLE_IMAGE_PREPROCESSING)
         self.binarization_enabled_var.set(Config.ENABLE_BINARIZATION)
         self.masking_enabled_var.set(Config.ENABLE_MASKING)
+        self.save_masked_preview_var.set(Config.SAVE_MASKED_PREVIEW)
         self.masked_preview_grayscale_var.set(Config.MASKED_PREVIEW_GRAYSCALE)
         self.masked_preview_show_bboxes_var.set(Config.MASKED_PREVIEW_SHOW_BBOXES)
         self.disable_processing_var.set(Config.DISABLE_PROCESSING)
@@ -1031,6 +1042,7 @@ class AutomationGUI:
             Config.ENABLE_IMAGE_PREPROCESSING = True
             Config.ENABLE_BINARIZATION = True
             Config.ENABLE_MASKING = True
+            Config.SAVE_MASKED_PREVIEW = True
             Config.MASKED_PREVIEW_GRAYSCALE = False
             Config.MASKED_PREVIEW_SHOW_BBOXES = True
             Config.DISABLE_PROCESSING = False
@@ -1137,6 +1149,8 @@ class AutomationGUI:
             cmd.append('--preview-grayscale')
         if not getattr(Config, 'MASKED_PREVIEW_SHOW_BBOXES', True):
             cmd.append('--no-preview-bboxes')
+        if not getattr(Config, 'SAVE_MASKED_PREVIEW', True):
+            cmd.append('--no-preview')
 
         self.thread_safe_set_status("Running OCR extraction...")
         self.thread_safe_log_message("Starting OCR extraction on captured screenshots...")
