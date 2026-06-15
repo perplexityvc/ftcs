@@ -1062,6 +1062,19 @@ class AutomationGUI:
     def run_automation(self):
         """Run automation (called in separate thread)."""
         try:
+            # Clear captured_screens folder before starting
+            capture_dir = Config.SAVE_DIR
+            if capture_dir and os.path.isdir(capture_dir):
+                self.thread_safe_log_message(f"Clearing capture directory: {capture_dir}")
+                for name in os.listdir(capture_dir):
+                    file_path = os.path.join(capture_dir, name)
+                    if os.path.isfile(file_path) and name.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff', '.webp')):
+                        try:
+                            os.remove(file_path)
+                        except Exception as e:
+                            self.thread_safe_log_message(f"Warning: Could not delete {name}: {e}")
+                self.thread_safe_log_message("Capture directory cleared")
+
             self.engine.run()
             if getattr(Config, 'DISABLE_PROCESSING', False):
                 self.thread_safe_log_message("Processing disabled: skipping OCR extraction")
