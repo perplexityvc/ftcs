@@ -145,6 +145,177 @@ SUPPORTED_IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff', 
 
 
 # ============================================================================
+# BOUNDING BOX DRAWING FUNCTIONS
+# ============================================================================
+
+def _parse_tsv_for_bboxes(tsv_data):
+    """Parse Tesseract TSV output into list of bbox dicts."""
+    boxes = []
+    for line in tsv_data.strip().split('\n')[1:]:
+        parts = line.split('\t')
+        if len(parts) < 12:
+            continue
+        try:
+            level = int(parts[0])
+            if level != 5:  # word-level only
+                continue
+            conf = float(parts[10])
+            if conf < 0:  # -1 = non-word block entry
+                continue
+            text = parts[11].strip()
+            if not text:
+                continue
+            boxes.append({
+                'left': int(parts[6]),
+                'top': int(parts[7]),
+                'width': int(parts[8]),
+                'height': int(parts[9]),
+                'conf': conf,
+                'text': text,
+            })
+        except (ValueError, IndexError):
+            continue
+    return boxes
+
+
+def draw_ocr_bboxes_on_image(pil_img, source_image_path):
+    """Overlay OCR bounding boxes and confidence labels on a PIL image.
+
+    Color coding:
+      green  (0, 200, 0)   — confidence >= 80 %
+      yellow (220, 180, 0) — confidence  50 – 79 %
+      red    (220, 0, 0)   — confidence  < 50 %
+    """
+    try:
+        from PIL import ImageDraw, ImageFont
+        import pytesseract
+
+        # Run Tesseract TSV on the original source image
+        import cv2
+        img = cv2.imread(str(source_image_path))
+        if img is None:
+            return pil_img
+
+        config = _get_tesseract_config()
+        tsv_data = pytesseract.image_to_data(img, config=config)
+        if not tsv_data or not tsv_data.strip():
+            return pil_img
+
+        boxes = _parse_tsv_for_bboxes(tsv_data)
+        if not boxes:
+            return pil_img
+
+        # Scale factor in case pil_img has been resized vs source
+        src_w, src_h = pil_img.size
+        try:
+            from PIL import Image as _PILImage
+            with _PILImage.open(source_image_path) as _src:
+                orig_w, orig_h = _src.size
+        except Exception:
+            orig_w, orig_h = src_w, src_h
+
+        scale_x = src_w / orig_w if orig_w > 0 else 1.0
+        scale_y = src_h / orig_h if orig_h > 0 else 1.0
+
+        draw = ImageDraw.Draw(pil_img)
+
+        # Try to load a small font
+        font = None
+        try:
+            font = ImageFont.truetype("arial.ttf", 11)
+        except Exception:
+            try:
+                font = ImageFont.load_default()
+            except Exception:
+                font = None
+
+        for box in boxes:
+            conf = box['conf']
+
+            if conf >= 80:
+                color = (0, 200, 0)  # green
+            elif conf >= 50:
+                color = (220, 180, 0)  # yellow
+            else:
+                color = (220, 0, 0)  # red
+
+            x0 = int(box['left'] * scale_x)
+            y0 = int(box['top'] * scale_y)
+            x1 = int((box['left'] + box['width']) * scale_x)
+            y1 = int((box['top'] + box['height']) * scale_y)
+
+            draw.rectangle([x0, y0, x1, y1], outline=color, width=1)
+
+            label = f"{conf:.0f}%"
+            label_y = max(0, y0 - 12)
+            if font:
+                draw.text((x0, label_y), label, fill=color, font=font)
+            else:
+                draw.text((x0, label_y), label, fill=color)
+
+        return pil_img
+
+    except ImportError:
+        # pytesseract or PIL not available — skip boxes silently
+        return pil_img
+    except Exception as e:
+        if getattr(logging, 'SHOW_PROGRESS', True):
+            print(f"  Warning: Could not draw OCR bounding boxes: {e}")
+        return pil_img
+
+
+def save_masked_preview(source_image_path, show_bboxes=True, grayscale=False):
+    """Save a masked preview of the image with optional bbox overlay."""
+    try:
+        from PIL import Image, ImageDraw
+
+        preview_dir = getattr(preprocessing, 'MASKED_PREVIEW_DIR', 'masked_inspection')
+        os.makedirs(preview_dir, exist_ok=True)
+
+        source_name = os.path.basename(source_image_path)
+        source_stem, source_ext = os.path.splitext(source_name)
+        ext = source_ext if source_ext else '.png'
+        preview_path = os.path.join(preview_dir, f"{source_stem}_masked{ext}")
+
+        # Load original image
+        img = Image.open(source_image_path).convert('RGB')
+
+        # Optionally convert to grayscale
+        if grayscale:
+            img = img.convert('L')
+
+        # Apply vertical mask
+        if getattr(preprocessing, 'APPLY_VERTICAL_MASK', True):
+            width, height = img.size
+            mask_top = getattr(preprocessing, 'MASK_TOP_RATIO', 0.33)
+            mask_bottom = getattr(preprocessing, 'MASK_BOTTOM_RATIO', 0.15)
+            top_pixels = int(height * max(0.0, min(1.0, mask_top)))
+            bottom_pixels = int(height * max(0.0, min(1.0, mask_bottom)))
+            draw = ImageDraw.Draw(img)
+            if top_pixels > 0:
+                draw.rectangle([0, 0, width - 1, min(top_pixels - 1, height - 1)], fill=0)
+            if bottom_pixels > 0:
+                start_y = max(0, height - bottom_pixels)
+                draw.rectangle([0, start_y, width - 1, height - 1], fill=0)
+
+        # Draw OCR bounding boxes if enabled
+        if show_bboxes:
+            img = draw_ocr_bboxes_on_image(img, source_image_path)
+
+        img.save(preview_path)
+        return preview_path
+
+    except ImportError:
+        if getattr(logging, 'SHOW_PROGRESS', True):
+            print("  Warning: Pillow not installed — cannot save masked preview")
+        return None
+    except Exception as e:
+        if getattr(logging, 'SHOW_PROGRESS', True):
+            print(f"  Warning: Could not save masked preview: {e}")
+        return None
+
+
+# ============================================================================
 # OCR FUNCTIONS
 # ============================================================================
 
@@ -461,6 +632,13 @@ def main(
         print(f"  Extracted: {len(rows)} rows")
         print(f"  Filtered:  {len(filtered_rows)} rows")
 
+        # Save masked preview with bounding boxes
+        show_bboxes = not getattr(args, 'no_preview_bboxes', False) if 'args' in dir() else getattr(preprocessing, 'MASKED_PREVIEW_SHOW_BBOXES', True)
+        use_grayscale = getattr(args, 'preview_grayscale', False) if 'args' in dir() else getattr(preprocessing, 'MASKED_PREVIEW_GRAYSCALE', False)
+        preview_path = save_masked_preview(str(input_image), show_bboxes=show_bboxes, grayscale=use_grayscale)
+        if preview_path:
+            print(f"  Preview:   {preview_path}")
+
     except FileNotFoundError:
         print(f"  Error: Image not found: {input_image}")
         return
@@ -564,6 +742,13 @@ def batch_process_images(
             print(f"  C/R Table: {cr_text}")
             print(f"  Extracted: {len(rows)} rows")
             print(f"  Filtered:  {len(filtered_rows)} rows")
+
+            # Save masked preview with bounding boxes
+            show_bboxes = not getattr(args, 'no_preview_bboxes', False) if 'args' in dir() else getattr(preprocessing, 'MASKED_PREVIEW_SHOW_BBOXES', True)
+            use_grayscale = getattr(args, 'preview_grayscale', False) if 'args' in dir() else getattr(preprocessing, 'MASKED_PREVIEW_GRAYSCALE', False)
+            preview_path = save_masked_preview(str(image_path), show_bboxes=show_bboxes, grayscale=use_grayscale)
+            if preview_path:
+                print(f"  Preview:   {preview_path}")
 
             per_file_stats.append({
                 'image': image_path,
