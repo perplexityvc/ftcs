@@ -704,6 +704,17 @@ def batch_process_images(
     if year_filter_value:
         print(f"\n*** YEAR FILTER: Only extracting data from year {year_filter_value} ***\n")
 
+    # Clear masked_inspection folder if it exists
+    preview_dir = getattr(preprocessing, 'MASKED_PREVIEW_DIR', 'masked_inspection')
+    if os.path.isdir(preview_dir):
+        for name in os.listdir(preview_dir):
+            file_path = os.path.join(preview_dir, name)
+            if os.path.isfile(file_path):
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    pass
+
     # Collect images
     try:
         image_files = collect_images_from_folder(input_folder, recursive=recursive)
