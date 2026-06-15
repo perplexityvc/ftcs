@@ -671,6 +671,14 @@ EXAMPLES:
                     help='Disable image preprocessing (kept for backward compatibility)')
     ap.add_argument('--grayscale-only', action='store_true',
                     help='Disable binarization, keep grayscale (kept for backward compatibility)')
+    ap.add_argument('--mask-top', type=float, default=None,
+                    help='Mask top percentage (0-100, default from settings)')
+    ap.add_argument('--mask-bottom', type=float, default=None,
+                    help='Mask bottom percentage (0-100, default from settings)')
+    ap.add_argument('--preview-grayscale', action='store_true',
+                    help='Save masked preview in grayscale')
+    ap.add_argument('--no-preview-bboxes', action='store_true',
+                    help='Disable OCR bounding box overlay on preview')
     ap.add_argument('--help-legacy', action='store_true',
                     help='Show legacy help message')
 
